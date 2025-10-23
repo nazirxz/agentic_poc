@@ -1,6 +1,23 @@
+from pathlib import Path
+
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import httpx
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class OrchestratorSettings(BaseSettings):
+    AGENT_STK_URL: str = "http://localhost:8001/act"
+    AGENT_RTS_URL: str = "http://localhost:8002/act"
+
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[1] / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+
+settings = OrchestratorSettings()
 
 app = FastAPI()
 
@@ -10,8 +27,8 @@ class OrchestrationRequest(BaseModel):
 
 
 AGENT_ENDPOINTS = {
-    "STK": "http://localhost:8001/act",
-    "RTS": "http://localhost:8002/act",
+    "STK": settings.AGENT_STK_URL,
+    "RTS": settings.AGENT_RTS_URL,
 }
 
 

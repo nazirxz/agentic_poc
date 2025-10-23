@@ -9,6 +9,17 @@ Eksperimen agentic AI yang terdiri dari dua agent domain (STK & RTS), sebuah orc
 - `apps/agent-rts` &mdash; Agent RTS dengan LangGraph RAG pipeline.
 - `apps/frontend` &mdash; Aplikasi Streamlit untuk interaksi pengguna.
 
+## Konfigurasi Lingkungan (.env)
+
+Setiap komponen membaca konfigurasi dari berkas `.env` di direktori masing-masing:
+
+- `apps/orchestrator/.env` — URL endpoint agent (`AGENT_STK_URL`, `AGENT_RTS_URL`).
+- `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default).
+- `apps/agent-rts/.env` — Parameter domain RTS (rerank dimatikan default).
+- `apps/frontend/.env` — Konfigurasi Streamlit (`ORCHESTRATOR_BASE_URL`, dll).
+
+Saat berjalan di container, override nilai tersebut memakai variabel lingkungan pada Deployment/OpenShift.
+
 ## Prasyarat
 
 - Python 3.11 atau lebih baru.
@@ -54,6 +65,8 @@ Endpoint kesehatan:
 - `GET http://localhost:8001/healthz`
 - `GET http://localhost:8002/healthz`
 - `GET http://localhost:8000/healthz`
+
+Konfigurasi default pada `.env` mematikan reranker (karena belum tersedia layanan `RERANK_URL`). Aktifkan kembali dengan mengubah `RERANK_ENABLED=true` ketika service siap.
 
 Contoh orkestrasi:
 
