@@ -1,7 +1,12 @@
 from pathlib import Path
+from typing import Any, Dict, List
 
 import httpx
+import orjson
 from fastapi import FastAPI, HTTPException
+from langchain_core.tools import tool
+from langchain_community.chat_models import ChatOllama
+from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +14,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class OrchestratorSettings(BaseSettings):
     AGENT_STK_URL: str = "http://localhost:7001/act"
     AGENT_RTS_URL: str = "http://localhost:7002/act"
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[1] / ".env",
@@ -26,17 +33,56 @@ class OrchestrationRequest(BaseModel):
     question: str
 
 
-AGENT_ENDPOINTS = {
-    "STK": settings.AGENT_STK_URL,
-    "RTS": settings.AGENT_RTS_URL,
-}
+async def _call_agent(url: str, domain: str, question: str) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(url, json={"question": question})
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"Agent {domain} error: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Agent {domain} returned invalid JSON") from exc
+
+    payload.setdefault("domain", domain)
+    return payload
 
 
-def pick_domain(question: str) -> str:
-    normalized = question.lower()
-    if any(keyword in normalized for keyword in ("rts", "rokan technical standard", "standard teknis")):
-        return "RTS"
-    return "STK"
+@tool
+async def call_stk_agent(question: str) -> str:
+    """Gunakan ketika pertanyaan menyangkut domain STK (TKO/TKI/TKPA/pedoman)."""
+    result = await _call_agent(settings.AGENT_STK_URL, "STK", question)
+    return orjson.dumps(result).decode()
+
+
+@tool
+async def call_rts_agent(question: str) -> str:
+    """Gunakan ketika pertanyaan menyangkut domain RTS atau standar teknis."""
+    result = await _call_agent(settings.AGENT_RTS_URL, "RTS", question)
+    return orjson.dumps(result).decode()
+
+
+llm = ChatOllama(
+    base_url=settings.OLLAMA_BASE_URL,
+    model=settings.OLLAMA_MODEL,
+    temperature=0.2,
+)
+
+system_prompt = (
+    "Anda adalah Orchestrator URBUDDY. Tugas Anda memilih agent yang tepat. "
+    "Gunakan tool STK untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman). "
+    "Gunakan tool RTS untuk pertanyaan mengenai standar teknis RTS. "
+    "Analisis langkah demi langkah sebelum memutuskan. "
+    "Pada jawaban akhir, tampilkan persis JSON yang dikembalikan agent tanpa tambahan kalimat." 
+)
+
+agent_executor = create_react_agent(
+    llm,
+    [call_stk_agent, call_rts_agent],
+    state_modifier=system_prompt,
+)
 
 
 @app.get("/healthz")
@@ -46,21 +92,26 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/orchestrate")
 async def orchestrate(request: OrchestrationRequest) -> dict:
-    domain = pick_domain(request.question)
-    target_url = AGENT_ENDPOINTS[domain]
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(target_url, json=request.model_dump())
-        except httpx.HTTPError as exc:  # pragma: no cover - network failure path
-            raise HTTPException(status_code=502, detail=f"Failed to reach agent {domain}: {exc}") from exc
+    try:
+        result = await agent_executor.ainvoke({"messages": [("user", request.question)]})
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Orchestrator failure: {exc}") from exc
 
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+    messages: List[Any] = result.get("messages", [])
+    if not messages:
+        raise HTTPException(status_code=502, detail="Orchestrator produced no response")
+
+    final_msg = messages[-1]
+    content = getattr(final_msg, "content", final_msg)
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+
+    if not isinstance(content, str):
+        content = str(content)
 
     try:
-        payload = response.json()
-    except ValueError as exc:  # pragma: no cover - unexpected agent response
-        raise HTTPException(status_code=502, detail=f"Invalid JSON from agent {domain}") from exc
+        payload = orjson.loads(content)
+    except orjson.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="Failed to parse orchestrator output as JSON") from exc
 
-    payload["domain"] = domain
     return payload

@@ -8,7 +8,6 @@ from langgraph.graph import END, StateGraph
 
 from .settings import AgentSettings
 
-DEFAULT_MODEL = "qwen2.5:latest"
 SYSTEM_PROMPT = (
     "Anda Agent STK. Jawab hanya dari dokumen kategori STK. Alur: detect_intent -> (doc_lookup) -> "
     "vector_search -> (rerank) -> guardrails -> compose -> cite. Selalu sertakan sitasi {document_name} "
@@ -92,6 +91,10 @@ def build_graph(settings: AgentSettings | None = None):
         return {"intent": intent, "diag": diag}
 
     def classify_collection(state: RAGState) -> Dict[str, Any]:
+        if state.get("collection"):
+            diag = merge_diag(state, "classify_collection", {"collection": state["collection"]})
+            return {"collection": state["collection"], "diag": diag}
+
         question = state.get("question", "") or ""
         normalized = question.lower()
         selected = DEFAULT_COLLECTION
@@ -239,7 +242,7 @@ def build_graph(settings: AgentSettings | None = None):
         )
 
         payload = {
-            "model": DEFAULT_MODEL,
+            "model": settings.OLLAMA_MODEL,
             "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},

@@ -13,10 +13,9 @@ Eksperimen agentic AI yang terdiri dari dua agent domain (STK & RTS), sebuah orc
 
 Setiap komponen membaca konfigurasi dari berkas `.env` di direktori masing-masing:
 
-- `apps/orchestrator/.env` — URL endpoint agent (`AGENT_STK_URL`, `AGENT_RTS_URL`).
-- `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default).
-- `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default). Pertanyaan akan otomatis diarahkan ke koleksi TKI/TKO/TKPA/Pedoman berdasarkan kata kunci.
-- `apps/agent-rts/.env` — Parameter domain RTS (rerank dimatikan default).
+- `apps/orchestrator/.env` — URL endpoint agent & koneksi Ollama (`AGENT_*`, `OLLAMA_*`).
+- `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default) plus `OLLAMA_*`. Tool ReAct bisa memilih koleksi TKI/TKO/TKPA/pedoman.
+- `apps/agent-rts/.env` — Parameter domain RTS (rerank dimatikan default) serta `OLLAMA_*`.
 - `apps/frontend/.env` — Konfigurasi Streamlit (`ORCHESTRATOR_BASE_URL`, dll).
 
 Saat berjalan di container, override nilai tersebut memakai variabel lingkungan pada Deployment/OpenShift.
@@ -87,6 +86,10 @@ export ORCHESTRATOR_BASE_URL=http://localhost:7000
 streamlit run apps/frontend/streamlit_app.py --server.port 8501
 ```
 
+### Troubleshooting Milvus 404
+
+- Milvus bawaan hanya membuka port gRPC di `19530`. REST gateway umumnya berada di `19537`. Pastikan `MILVUS_RAG_URL` mengarah ke endpoint HTTP yang menyediakan `/search`. Jika memakai gateway custom, ubah nilai `.env` sesuai host/port yang benar.
+
 ## Catatan Pengujian
 
 Saat ini tidak ada test suite aktif (folder `tests/` telah dihapus). Disarankan menambahkan test unit/integrasi seputar guardrails, routing, dan formatting sebelum masuk tahap produksi.
@@ -131,7 +134,8 @@ oc create secret generic rag-secrets --from-literal=OLLAMA_BASE_URL=... --from-l
 oc new-app registry.example.com/urbuddy/agent-stk:v1 \
   --name=agent-stk \
   -e OLLAMA_BASE_URL=http://ollama:11434 \
-  -e MILVUS_RAG_URL=http://milvus:19530 \
+  -e OLLAMA_MODEL=qwen2.5 \
+  -e MILVUS_RAG_URL=http://milvus:19537 \
   -e RERANK_URL=http://reranker:8082
 
 oc expose deployment/agent-stk --port=7001 --target-port=7001
@@ -139,7 +143,8 @@ oc expose deployment/agent-stk --port=7001 --target-port=7001
 oc new-app registry.example.com/urbuddy/agent-rts:v1 \
   --name=agent-rts \
   -e OLLAMA_BASE_URL=http://ollama:11434 \
-  -e MILVUS_RAG_URL=http://milvus:19530 \
+  -e OLLAMA_MODEL=qwen2.5 \
+  -e MILVUS_RAG_URL=http://milvus:19537 \
   -e RERANK_URL=http://reranker:8082
 
 oc expose deployment/agent-rts --port=7002 --target-port=7002

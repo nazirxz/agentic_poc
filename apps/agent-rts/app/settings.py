@@ -14,7 +14,9 @@ class AgentSettings(BaseSettings):
     MAX_CONTEXT: int = 8
     STYLE: str = "teknis-formal"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    MILVUS_RAG_URL: str = "http://localhost:19530"
+    OLLAMA_MODEL: str = "qwen2.5"
+
+    MILVUS_RAG_URL: str = "http://localhost:19537"
     RERANK_URL: str = "http://localhost:8082"
 
     model_config = SettingsConfigDict(
