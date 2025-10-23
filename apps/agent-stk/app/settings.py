@@ -14,7 +14,7 @@ class AgentSettings(BaseSettings):
     MAX_CONTEXT: int = 8
     STYLE: str = "ringkas-berbutir"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    MILVUS_RAG_URL: str = "http://localhost:8080"
+    MILVUS_RAG_URL: str = "http://localhost:19530"
     RERANK_URL: str = "http://localhost:8082"
 
     model_config = SettingsConfigDict(

@@ -128,7 +128,7 @@ oc create secret generic rag-secrets --from-literal=OLLAMA_BASE_URL=... --from-l
 oc new-app registry.example.com/urbuddy/agent-stk:v1 \
   --name=agent-stk \
   -e OLLAMA_BASE_URL=http://ollama:11434 \
-  -e MILVUS_RAG_URL=http://milvus:8080 \
+  -e MILVUS_RAG_URL=http://milvus:19530 \
   -e RERANK_URL=http://reranker:8082
 
 oc expose deployment/agent-stk --port=8001 --target-port=8001
@@ -136,7 +136,7 @@ oc expose deployment/agent-stk --port=8001 --target-port=8001
 oc new-app registry.example.com/urbuddy/agent-rts:v1 \
   --name=agent-rts \
   -e OLLAMA_BASE_URL=http://ollama:11434 \
-  -e MILVUS_RAG_URL=http://milvus:8080 \
+  -e MILVUS_RAG_URL=http://milvus:19530 \
   -e RERANK_URL=http://reranker:8082
 
 oc expose deployment/agent-rts --port=8002 --target-port=8002
