@@ -32,6 +32,7 @@ class Passage(TypedDict, total=False):
 class RAGState(TypedDict, total=False):
     question: str
     intent: str
+    collection: str
     candidates: List[Candidate]
     passages: List[Passage]
     answer: str
@@ -69,6 +70,13 @@ def finalize_answer_and_citations(
 
 def build_graph(settings: AgentSettings | None = None):
     settings = settings or AgentSettings()
+    DEFAULT_COLLECTION = "pedoman"
+    COLLECTION_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+        "pedoman": ("pedoman", "manual"),
+        "TKO": ("tko", "tata kerja organisasi", "prosedur kerja"),
+        "TKI": ("tki", "tata kerja individu"),
+        "TKPA": ("tkpa", "tata kerja penggunaan alat", "instruksi kerja"),
+    }
 
     def merge_diag(state: RAGState, key: str, value: Any) -> Dict[str, Any]:
         diag = dict(state.get("diag", {}))
@@ -82,6 +90,17 @@ def build_graph(settings: AgentSettings | None = None):
         intent = "doc" if any(marker in normalized for marker in markers) else "general"
         diag = merge_diag(state, "detect_intent", {"intent": intent})
         return {"intent": intent, "diag": diag}
+
+    def classify_collection(state: RAGState) -> Dict[str, Any]:
+        question = state.get("question", "") or ""
+        normalized = question.lower()
+        selected = DEFAULT_COLLECTION
+        for name, keywords in COLLECTION_KEYWORDS.items():
+            if any(keyword in normalized for keyword in keywords):
+                selected = name
+                break
+        diag = merge_diag(state, "classify_collection", {"collection": selected})
+        return {"collection": selected, "diag": diag}
 
     def doc_lookup(state: RAGState) -> Dict[str, Any]:
         question = state.get("question", "") or ""
@@ -106,6 +125,10 @@ def build_graph(settings: AgentSettings | None = None):
         candidates = state.get("candidates") or []
         if state.get("intent") == "doc" and candidates:
             filters["document_id"] = [c["document_id"] for c in candidates if c.get("document_id")]
+
+        collection = state.get("collection")
+        if collection:
+            filters["collection"] = collection
 
         payload = {
             "q": state.get("question", ""),
@@ -264,6 +287,7 @@ def build_graph(settings: AgentSettings | None = None):
 
     workflow = StateGraph(RAGState)
     workflow.add_node("detect_intent", detect_intent)
+    workflow.add_node("classify_collection", classify_collection)
     workflow.add_node("doc_lookup", doc_lookup)
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("rerank", rerank)
@@ -272,7 +296,8 @@ def build_graph(settings: AgentSettings | None = None):
     workflow.add_node("cite", cite)
 
     workflow.set_entry_point("detect_intent")
-    workflow.add_edge("detect_intent", "doc_lookup")
+    workflow.add_edge("detect_intent", "classify_collection")
+    workflow.add_edge("classify_collection", "doc_lookup")
     workflow.add_edge("doc_lookup", "retrieve")
     workflow.add_edge("retrieve", "rerank")
     workflow.add_edge("rerank", "guardrails")

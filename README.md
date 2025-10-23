@@ -15,6 +15,7 @@ Setiap komponen membaca konfigurasi dari berkas `.env` di direktori masing-masin
 
 - `apps/orchestrator/.env` — URL endpoint agent (`AGENT_STK_URL`, `AGENT_RTS_URL`).
 - `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default).
+- `apps/agent-stk/.env` — Parameter domain STK (rerank dimatikan default). Pertanyaan akan otomatis diarahkan ke koleksi TKI/TKO/TKPA/Pedoman berdasarkan kata kunci.
 - `apps/agent-rts/.env` — Parameter domain RTS (rerank dimatikan default).
 - `apps/frontend/.env` — Konfigurasi Streamlit (`ORCHESTRATOR_BASE_URL`, dll).
 
@@ -34,13 +35,15 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install --upgrade pip
 
 # Instal tiap komponen (editable install memudahkan pengembangan)
-pip install -e apps/orchestrator \
-             -e apps/agent-stk \
-             -e apps/agent-rts \
-             -e apps/frontend
+pip install -e ./apps/orchestrator \
+             -e ./apps/agent-stk \
+             -e ./apps/agent-rts \
+             -e ./apps/frontend
 ```
 
 Setiap agent dapat diubah konfigurasinya melalui variabel lingkungan (lihat `app/settings.py` masing-masing).
+
+> Catatan: jika tidak melakukan instalasi editable, jalankan service dengan `PYTHONPATH=$PWD python -m uvicorn ...` agar paket `apps` dapat ditemukan.
 
 ## Menjalankan Layanan Secara Lokal
 
