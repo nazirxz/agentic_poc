@@ -24,7 +24,7 @@ def load_local_env() -> None:
 
 load_local_env()
 
-DEFAULT_BASE_URL = "http://localhost:8000"
+DEFAULT_BASE_URL = "http://localhost:7000"
 DEFAULT_TIMEOUT = 30.0
 
 ORCHESTRATOR_BASE_URL = os.getenv("ORCHESTRATOR_BASE_URL", DEFAULT_BASE_URL)

@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class OrchestratorSettings(BaseSettings):
-    AGENT_STK_URL: str = "http://localhost:8001/act"
-    AGENT_RTS_URL: str = "http://localhost:8002/act"
+    AGENT_STK_URL: str = "http://localhost:7001/act"
+    AGENT_RTS_URL: str = "http://localhost:7002/act"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[1] / ".env",

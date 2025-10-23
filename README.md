@@ -48,13 +48,13 @@ Di terminal terpisah (setelah virtualenv aktif):
 
 ```bash
 # Agent STK
-uvicorn apps.agent-stk.app.server:app --port 8001
+uvicorn apps.agent-stk.app.server:app --port 7001
 
 # Agent RTS
-uvicorn apps.agent-rts.app.server:app --port 8002
+uvicorn apps.agent-rts.app.server:app --port 7002
 
 # Orchestrator
-uvicorn apps.orchestrator.app.main:app --port 8000
+uvicorn apps.orchestrator.app.main:app --port 7000
 
 # Streamlit Frontend
 streamlit run apps/frontend/streamlit_app.py --server.port 8501
@@ -62,17 +62,17 @@ streamlit run apps/frontend/streamlit_app.py --server.port 8501
 
 Endpoint kesehatan:
 
-- `GET http://localhost:8001/healthz`
-- `GET http://localhost:8002/healthz`
-- `GET http://localhost:8000/healthz`
+- `GET http://localhost:7001/healthz`
+- `GET http://localhost:7002/healthz`
+- `GET http://localhost:7000/healthz`
 
 Konfigurasi default pada `.env` mematikan reranker (karena belum tersedia layanan `RERANK_URL`). Aktifkan kembali dengan mengubah `RERANK_ENABLED=true` ketika service siap.
 
 Contoh orkestrasi:
 
 ```bash
-curl -s localhost:8000/healthz
-curl -s -X POST localhost:8000/orchestrate \
+curl -s localhost:7000/healthz
+curl -s -X POST localhost:7000/orchestrate \
      -H "Content-Type: application/json" \
      -d '{"question":"Apa kebijakan workover menurut STK?"}'
 ```
@@ -80,7 +80,7 @@ curl -s -X POST localhost:8000/orchestrate \
 Streamlit akan otomatis mengirim pertanyaan ke `/orchestrate`; atur basis URL via env var:
 
 ```bash
-export ORCHESTRATOR_BASE_URL=http://localhost:8000
+export ORCHESTRATOR_BASE_URL=http://localhost:7000
 streamlit run apps/frontend/streamlit_app.py --server.port 8501
 ```
 
@@ -101,8 +101,8 @@ WORKDIR /app
 COPY apps/orchestrator /app
 RUN pip install --no-cache-dir .
 
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 7000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7000"]
 ```
 
 Gunakan path `apps/agent-stk`, `apps/agent-rts`, dan `apps/frontend` untuk image lainnya. Pastikan dependency sistem (mis. build-essential) ditambahkan bila diperlukan oleh paket Python tertentu.
@@ -131,7 +131,7 @@ oc new-app registry.example.com/urbuddy/agent-stk:v1 \
   -e MILVUS_RAG_URL=http://milvus:19530 \
   -e RERANK_URL=http://reranker:8082
 
-oc expose deployment/agent-stk --port=8001 --target-port=8001
+oc expose deployment/agent-stk --port=7001 --target-port=7001
 
 oc new-app registry.example.com/urbuddy/agent-rts:v1 \
   --name=agent-rts \
@@ -139,7 +139,7 @@ oc new-app registry.example.com/urbuddy/agent-rts:v1 \
   -e MILVUS_RAG_URL=http://milvus:19530 \
   -e RERANK_URL=http://reranker:8082
 
-oc expose deployment/agent-rts --port=8002 --target-port=8002
+oc expose deployment/agent-rts --port=7002 --target-port=7002
 ```
 
 Jika hanya perlu akses internal cluster, cukup buat Service (`oc expose`) tanpa Route publik.
@@ -149,10 +149,10 @@ Jika hanya perlu akses internal cluster, cukup buat Service (`oc expose`) tanpa 
 ```bash
 oc new-app registry.example.com/urbuddy/agent-orchestrator:v1 \
   --name=agent-orchestrator \
-  -e AGENT_STK_URL=http://agent-stk:8001/act \
-  -e AGENT_RTS_URL=http://agent-rts:8002/act
+  -e AGENT_STK_URL=http://agent-stk:7001/act \
+  -e AGENT_RTS_URL=http://agent-rts:7002/act
 
-oc expose deployment/agent-orchestrator --port=8000 --target-port=8000
+oc expose deployment/agent-orchestrator --port=7000 --target-port=7000
 oc expose service/agent-orchestrator  # Membuat Route publik (opsional)
 ```
 
@@ -163,7 +163,7 @@ Jika menggunakan env var custom, tambahkan di Dockerfile atau deployment config 
 ```bash
 oc new-app registry.example.com/urbuddy/agent-frontend:v1 \
   --name=agent-frontend \
-  -e ORCHESTRATOR_BASE_URL=http://agent-orchestrator:8000
+  -e ORCHESTRATOR_BASE_URL=http://agent-orchestrator:7000
 
 oc expose deployment/agent-frontend --port=8501 --target-port=8501
 oc expose service/agent-frontend  # Route agar pengguna dapat mengakses UI
