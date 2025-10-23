@@ -3,7 +3,7 @@ from __future__ import annotations
 import orjson
 from fastapi import FastAPI, HTTPException
 from langchain_core.tools import tool
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
 
@@ -51,7 +51,7 @@ system_prompt = (
 agent_executor = create_react_agent(
     llm,
     [answer_rts_general],
-    state_modifier=system_prompt,
+    prompt=system_prompt,
 )
 
 app = FastAPI()

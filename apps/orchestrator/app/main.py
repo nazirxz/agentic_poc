@@ -81,7 +81,7 @@ system_prompt = (
 agent_executor = create_react_agent(
     llm,
     [call_stk_agent, call_rts_agent],
-    state_modifier=system_prompt,
+    prompt=system_prompt,
 )
 
 

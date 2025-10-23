@@ -24,6 +24,7 @@ Saat berjalan di container, override nilai tersebut memakai variabel lingkungan 
 
 - Python 3.11 atau lebih baru.
 - Dependensi pihak ketiga (FastAPI, LangGraph, Streamlit, dst) di-install melalui `pip`.
+- Tambahan paket `langchain-ollama` diperlukan untuk integrasi LLM Ollama dalam arsitektur ReAct.
 - Layanan eksternal (Milvus RAG API, Reranker, LLM Ollama/OpenAI-compatible) tersedia bila ingin menjalankan alur RAG penuh.
 
 ## Instalasi Lokal
@@ -37,7 +38,8 @@ pip install --upgrade pip
 pip install -e ./apps/orchestrator \
              -e ./apps/agent-stk \
              -e ./apps/agent-rts \
-             -e ./apps/frontend
+             -e ./apps/frontend \
+             langchain-ollama
 ```
 
 Setiap agent dapat diubah konfigurasinya melalui variabel lingkungan (lihat `app/settings.py` masing-masing).
