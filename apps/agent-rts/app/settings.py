@@ -20,6 +20,25 @@ class AgentSettings(BaseSettings):
     MILVUS_CONNECTION_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION_NAME: str = "rokan_technical_standard"
     RERANK_URL: str = "http://localhost:8082"
+    
+    # Configurable search parameters
+    MAX_PASSAGES: int = 4
+    MAX_TEXT_LENGTH: int = 500
+    MAX_CONTEXT_LENGTH: int = 2000
+    MIN_RELEVANCE_SCORE: float = -0.5
+    MIN_TEXT_LENGTH: int = 30
+    
+    # Configurable penalties and boosts
+    NON_TECHNICAL_PENALTY: float = 0.3
+    SHORT_TEXT_PENALTY: float = 0.2
+    HTML_PENALTY: float = 0.8
+    KEYWORD_BOOST: float = 0.5
+    TECHNICAL_TERM_BOOST: float = 0.2
+    RTS_TERM_BOOST: float = 0.1
+    
+    # Configurable timeouts
+    LLM_TIMEOUT: int = 30
+    MAX_RETRIES: int = 2
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[1] / ".env",

@@ -131,31 +131,47 @@ async def answer_rts_general(question: str) -> str:
         
         print(f"DEBUG: Vector search returned {len(vector_results[0]) if vector_results else 0} hits")
         
-        # 2. Keyword search for specific terms with stricter filtering
+        # 2. Dynamic keyword search based on extracted keywords
         keyword_results = []
-        if "bil" in question.lower():
+        extracted_keywords = _extract_keywords_from_question(question)
+        print(f"DEBUG: Extracted keywords from question: {extracted_keywords}")
+        
+        if extracted_keywords:
             try:
-                # More specific keyword search - exclude approval/update documents
-                keyword_results = client.query(
-                    collection_name=settings.MILVUS_COLLECTION_NAME,
-                    filter='(text like "%bil%" or keyword like "%bil%" or summary like "%bil%") and text not like "%persetujuan%" and text not like "%pengkinian%" and text not like "%approval%"',
-                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
-                    limit=10
-                )
-                print(f"DEBUG: Keyword search for 'bil' (filtered) returned {len(keyword_results)} hits")
+                # Build dynamic filter for keyword search
+                keyword_filters = []
+                for keyword in extracted_keywords:
+                    keyword_filters.append(f'text like "%{keyword}%"')
                 
-                # Additional search for technical specifications
-                tech_results = client.query(
-                    collection_name=settings.MILVUS_COLLECTION_NAME,
-                    filter='(text like "%specification%" or text like "%standard%" or text like "%requirement%") and (text like "%bil%" or text like "%insulation%" or text like "%voltage%")',
-                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
-                    limit=5
-                )
-                print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
-                keyword_results.extend(tech_results)
+                if keyword_filters:
+                    # Use OR logic for multiple keywords
+                    filter_expression = " or ".join(keyword_filters)
+                    
+                    keyword_results = client.query(
+                        collection_name=settings.MILVUS_COLLECTION_NAME,
+                        filter=filter_expression,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                        limit=10
+                    )
+                    print(f"DEBUG: Dynamic keyword search returned {len(keyword_results)} hits")
+                
+                # Additional search for technical specifications if relevant keywords found
+                technical_keywords = [kw for kw in extracted_keywords if kw in ["specification", "standard", "requirement", "technical"]]
+                if technical_keywords:
+                    try:
+                        tech_results = client.query(
+                            collection_name=settings.MILVUS_COLLECTION_NAME,
+                            filter='text like "%specification%" or text like "%standard%"',
+                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                            limit=5
+                        )
+                        print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
+                        keyword_results.extend(tech_results)
+                    except Exception as e:
+                        print(f"DEBUG: Technical specification search failed: {e}")
                 
             except Exception as e:
-                print(f"DEBUG: Keyword search failed: {e}")
+                print(f"DEBUG: Dynamic keyword search failed: {e}")
         
         # Combine results
         results = vector_results
@@ -258,25 +274,29 @@ async def answer_rts_general(question: str) -> str:
         seen_citations = set()
         
         # Use top passages after reranking, but limit context length to prevent timeout
-        relevant_passages = passages[:min(settings.MAX_CONTEXT, 4)]  # Reduce to 4 passages max
+        relevant_passages = passages[:min(settings.MAX_CONTEXT, settings.MAX_PASSAGES)]
         print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking (limited to prevent timeout)")
         
-        # Additional quality check - only use passages with meaningful technical content
+        # Additional quality check - prefer technical content but don't filter everything
         quality_passages = []
+        filtering_rules = _get_filtering_rules()
+        
         for passage in relevant_passages:
             text = passage.get("text", "").lower()
-            # Skip passages that are mostly administrative/approval content
-            if any(term in text for term in ["persetujuan", "pengkinian", "approval", "<!-- image -->", "date", "subject"]):
-                print(f"DEBUG: Skipping administrative passage: {passage['text'][:50]}...")
+            # Skip only if it's clearly administrative content with no technical value
+            if (any(term in text for term in filtering_rules["administrative_terms"]) and 
+                not any(term in text for term in filtering_rules["technical_value_terms"])):
+                print(f"DEBUG: Skipping pure administrative passage: {passage['text'][:50]}...")
                 continue
-            # Skip very short or mostly HTML content
-            if len(text) < 100 or text.count("<") > 3:
-                print(f"DEBUG: Skipping low-quality passage: {passage['text'][:50]}...")
+            # Skip only very short content
+            if len(text) < settings.MIN_TEXT_LENGTH:
+                print(f"DEBUG: Skipping very short passage: {passage['text'][:50]}...")
                 continue
             quality_passages.append(passage)
         
-        relevant_passages = quality_passages[:3]  # Use max 3 high-quality passages
-        print(f"DEBUG: Using {len(relevant_passages)} high-quality passages after filtering")
+        # Use up to MAX_PASSAGES, but prefer quality ones
+        relevant_passages = quality_passages[:settings.MAX_PASSAGES] if quality_passages else relevant_passages[:settings.MAX_PASSAGES]
+        print(f"DEBUG: Using {len(relevant_passages)} passages after quality filtering")
         
         for passage in relevant_passages:
             # Extract citation
@@ -292,19 +312,17 @@ async def answer_rts_general(question: str) -> str:
             # Add to context with text truncation
             text = passage.get("text") or ""
             # Truncate text to prevent very long contexts
-            max_text_length = 500
-            if len(text) > max_text_length:
-                text = text[:max_text_length] + "..."
+            if len(text) > settings.MAX_TEXT_LENGTH:
+                text = text[:settings.MAX_TEXT_LENGTH] + "..."
             context_lines.append(f"{doc_name} p.{page_str}: {text}")
         
         context = "\n\n".join(context_lines)
         
         # Additional context length check
-        max_context_length = 2000  # Limit total context length
         print(f"DEBUG: Context length: {len(context)} characters")
-        if len(context) > max_context_length:
-            print(f"DEBUG: Context too long ({len(context)} chars), truncating to {max_context_length}")
-            context = context[:max_context_length] + "..."
+        if len(context) > settings.MAX_CONTEXT_LENGTH:
+            print(f"DEBUG: Context too long ({len(context)} chars), truncating to {settings.MAX_CONTEXT_LENGTH}")
+            context = context[:settings.MAX_CONTEXT_LENGTH] + "..."
         
         # Generate answer using LLM
         system_prompt = (
@@ -341,10 +359,9 @@ async def answer_rts_general(question: str) -> str:
         }
         
         # Try LLM call with timeout and retry
-        max_retries = 2
-        for attempt in range(max_retries):
+        for attempt in range(settings.MAX_RETRIES):
             try:
-                async with httpx.AsyncClient(timeout=30) as client:  # Reduced timeout
+                async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT) as client:
                     llm_response = await client.post(
                         f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
                         json=llm_payload,
@@ -353,16 +370,16 @@ async def answer_rts_general(question: str) -> str:
                     llm_data = llm_response.json()
                     break  # Success, exit retry loop
             except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
-                print(f"DEBUG: LLM timeout attempt {attempt + 1}/{max_retries}: {e}")
-                if attempt == max_retries - 1:
+                print(f"DEBUG: LLM timeout attempt {attempt + 1}/{settings.MAX_RETRIES}: {e}")
+                if attempt == settings.MAX_RETRIES - 1:
                     # Last attempt failed, use fallback
                     print("DEBUG: All LLM attempts failed, using fallback")
                     return await _fallback_llm_response(question, "RTS")
                 # Wait before retry
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"DEBUG: LLM error attempt {attempt + 1}/{max_retries}: {e}")
-                if attempt == max_retries - 1:
+                print(f"DEBUG: LLM error attempt {attempt + 1}/{settings.MAX_RETRIES}: {e}")
+                if attempt == settings.MAX_RETRIES - 1:
                     return await _fallback_llm_response(question, "RTS")
                 await asyncio.sleep(1)
         
@@ -391,39 +408,67 @@ async def answer_rts_general(question: str) -> str:
         return await _fallback_llm_response(question, "RTS")
 
 
+def _get_expansion_rules() -> dict:
+    """Get configurable query expansion rules"""
+    return {
+        "nilai": [
+            "value", "parameter", "specification", "standard",
+            "requirement", "criteria", "measurement", "threshold"
+        ],
+        "rokan technical standard": [
+            "RTS", "rokan standard", "technical standard", "engineering standard",
+            "rokan specification", "rokan requirement"
+        ],
+        "berapa": [
+            "what is", "what are", "how much", "how many", "what value", "what parameter"
+        ],
+        "technical": [
+            "specification", "standard", "requirement", "criteria", "parameter"
+        ]
+    }
+
+def _get_filtering_rules() -> dict:
+    """Get configurable filtering rules"""
+    return {
+        "non_technical_terms": ["persetujuan", "pengkinian", "approval", "update", "<!-- image -->", "date", "subject"],
+        "technical_terms": ["specification", "requirement", "standard", "voltage", "insulation", "electrical", "technical"],
+        "rts_terms": ["rts", "rokan", "technical", "standard", "specification"],
+        "administrative_terms": ["persetujuan", "pengkinian", "approval"],
+        "technical_value_terms": ["specification", "standard", "technical", "voltage", "insulation", "requirement", "criteria"]
+    }
+
+def _extract_keywords_from_question(question: str) -> List[str]:
+    """Extract relevant keywords from question for keyword search"""
+    question_lower = question.lower()
+    keywords = []
+    
+    # Extract technical terms (3+ characters, alphanumeric)
+    import re
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', question_lower)
+    
+    # Filter out common words and keep technical terms
+    common_words = {"the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "berapa", "yang", "ada", "di", "dalam", "untuk", "dengan", "oleh"}
+    technical_words = [word for word in words if word not in common_words and len(word) >= 3]
+    
+    # Add specific technical patterns
+    technical_patterns = [
+        r'\b[a-z]{2,}\d+\b',  # Alphanumeric codes like "bil", "rts"
+        r'\b[a-z]+[-_][a-z]+\b',  # Hyphenated terms
+        r'\b[a-z]{4,}\b'  # Longer technical terms
+    ]
+    
+    for pattern in technical_patterns:
+        matches = re.findall(pattern, question_lower)
+        keywords.extend(matches)
+    
+    # Remove duplicates and limit
+    keywords = list(set(keywords))[:5]  # Max 5 keywords
+    return keywords
+
 async def _expand_query(question: str) -> List[str]:
     """Expand query with synonyms and related terms for better retrieval"""
     expanded = [question]  # Always include original question
-    
-    # Define query expansion rules for RTS domain
-    expansion_rules = {
-        "nilai bil": [
-            "bil value",
-            "bil parameter", 
-            "bil specification",
-            "bil standard",
-            "bil requirement",
-            "bil criteria",
-            "bil measurement",
-            "bil threshold"
-        ],
-        "rokan technical standard": [
-            "RTS",
-            "rokan standard",
-            "technical standard",
-            "engineering standard",
-            "rokan specification",
-            "rokan requirement"
-        ],
-        "berapa": [
-            "what is",
-            "what are",
-            "how much",
-            "how many",
-            "what value",
-            "what parameter"
-        ]
-    }
+    expansion_rules = _get_expansion_rules()
     
     # Apply expansion rules
     question_lower = question.lower()
@@ -433,16 +478,6 @@ async def _expand_query(question: str) -> List[str]:
                 expanded_query = question_lower.replace(key, expansion)
                 if expanded_query not in expanded:
                     expanded.append(expanded_query)
-    
-    # Add technical variations
-    if "bil" in question_lower:
-        technical_variations = [
-            question_lower.replace("bil", "BIL"),
-            question_lower.replace("bil", "Basic Insulation Level"),
-            question_lower.replace("bil", "insulation level"),
-            question_lower.replace("bil", "voltage level")
-        ]
-        expanded.extend(technical_variations)
     
     # Limit to reasonable number of queries
     return expanded[:5]
@@ -462,47 +497,49 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         keyword = passage.get("keyword", "").lower()
         summary = passage.get("summary", "").lower()
         
-        # Heavy penalty for non-technical documents
-        non_technical_terms = ["persetujuan", "pengkinian", "approval", "update", "<!-- image -->", "date", "subject"]
-        for term in non_technical_terms:
+        # Get filtering rules
+        filtering_rules = _get_filtering_rules()
+        
+        # Apply penalties for non-technical documents
+        for term in filtering_rules["non_technical_terms"]:
             if term in text:
-                score -= 1.0  # Heavy penalty
+                score -= settings.NON_TECHNICAL_PENALTY
         
         # Boost score for keyword matches
         if passage.get("source") == "keyword":
-            score += 0.5
+            score += settings.KEYWORD_BOOST
         
         # Boost score for exact keyword matches
-        if "bil" in question_lower and "bil" in text:
-            score += 0.5  # Increased boost
+        extracted_keywords = _extract_keywords_from_question(question)
+        for keyword in extracted_keywords:
+            if keyword in text:
+                score += settings.KEYWORD_BOOST
         
         # Boost score for technical terms
-        technical_terms = ["specification", "requirement", "standard", "voltage", "insulation", "electrical", "technical"]
-        for term in technical_terms:
+        for term in filtering_rules["technical_terms"]:
             if term in text:
-                score += 0.2
+                score += settings.TECHNICAL_TERM_BOOST
         
         # Boost score for RTS-related terms
-        rts_terms = ["rts", "rokan", "technical", "standard", "specification"]
-        for term in rts_terms:
+        for term in filtering_rules["rts_terms"]:
             if term in text:
-                score += 0.1
+                score += settings.RTS_TERM_BOOST
         
         # Boost score for keyword field matches
         if keyword and any(word in keyword for word in question_words):
-            score += 0.3  # Increased boost
+            score += settings.KEYWORD_BOOST * 0.6  # Slightly less than direct keyword match
         
         # Boost score for summary matches
         if summary and any(word in summary for word in question_words):
-            score += 0.2
+            score += settings.TECHNICAL_TERM_BOOST
         
         # Penalize very short passages
-        if len(text) < 50:
-            score -= 0.5  # Increased penalty
+        if len(text) < settings.MIN_TEXT_LENGTH:
+            score -= settings.SHORT_TEXT_PENALTY
         
         # Penalize passages that are mostly HTML/formatting
         if text.count("<") > 5 or text.count("&") > 3:
-            score -= 0.8
+            score -= settings.HTML_PENALTY
         
         return score
     
@@ -514,10 +551,9 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
     passages.sort(key=lambda x: x["relevance_score"], reverse=True)
     
     # Filter out passages with very low relevance scores
-    min_relevance_score = 0.0  # Only keep passages with positive scores
-    filtered_passages = [p for p in passages if p["relevance_score"] > min_relevance_score]
+    filtered_passages = [p for p in passages if p["relevance_score"] > settings.MIN_RELEVANCE_SCORE]
     
-    print(f"DEBUG: Passages after filtering: {len(filtered_passages)}/{len(passages)} (min score: {min_relevance_score})")
+    print(f"DEBUG: Passages after filtering: {len(filtered_passages)}/{len(passages)} (min score: {settings.MIN_RELEVANCE_SCORE})")
     print(f"DEBUG: Top 3 passages after reranking:")
     for i, passage in enumerate(filtered_passages[:3]):
         print(f"  {i+1}. Score: {passage['relevance_score']:.3f}, Source: {passage['source']}, Text: {passage['text'][:100]}...")
