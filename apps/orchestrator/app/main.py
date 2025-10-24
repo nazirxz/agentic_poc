@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class OrchestratorSettings(BaseSettings):
     AGENT_STK_URL: str = "http://localhost:7001/act"
     AGENT_RTS_URL: str = "http://localhost:7002/act"
+    AGENT_GENERAL_URL: str = "http://localhost:7003/chat"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5"
 
@@ -64,6 +65,13 @@ async def call_rts_agent(question: str) -> str:
     return orjson.dumps(result).decode()
 
 
+@tool
+async def call_general_agent(question: str) -> str:
+    """Gunakan untuk pertanyaan umum, sapaan, atau obrolan yang tidak memerlukan pencarian dokumen."""
+    result = await _call_agent(settings.AGENT_GENERAL_URL, "GENERAL", question)
+    return orjson.dumps(result).decode()
+
+
 llm = ChatOllama(
     base_url=settings.OLLAMA_BASE_URL,
     model=settings.OLLAMA_MODEL,
@@ -73,17 +81,16 @@ llm = ChatOllama(
 system_prompt = (
     "Anda adalah Orchestrator URBUDDY. Tugas Anda WAJIB memilih dan memanggil tool agent yang tepat. "
     "ATURAN PENTING:\n"
-    "1. WAJIB panggil tool STK untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman).\n"
-    "2. WAJIB panggil tool RTS untuk pertanyaan mengenai standar teknis RTS.\n"
-    "3. Jika tidak jelas, gunakan tool STK sebagai default.\n"
-    "4. JANGAN jawab sendiri - SELALU gunakan tool.\n"
-    "5. Untuk pertanyaan umum (sapaan/hello), gunakan tool STK.\n"
-    "6. Jawaban akhir HANYA JSON murni dari tool tanpa teks tambahan."
+    "1. Untuk sapaan, obrolan umum, pertanyaan tentang kemampuan sistem → call_general_agent\n"
+    "2. Untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman, prosedur kerja) → call_stk_agent\n"
+    "3. Untuk pertanyaan standar teknis RTS → call_rts_agent\n"
+    "4. WAJIB panggil tool - JANGAN jawab sendiri\n"
+    "5. Jawaban akhir HANYA JSON murni dari tool tanpa teks tambahan."
 )
 
 agent_executor = create_react_agent(
     llm,
-    [call_stk_agent, call_rts_agent],
+    [call_general_agent, call_stk_agent, call_rts_agent],
     prompt=system_prompt,
 )
 
