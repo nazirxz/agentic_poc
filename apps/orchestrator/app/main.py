@@ -5,7 +5,7 @@ import httpx
 import orjson
 from fastapi import FastAPI, HTTPException
 from langchain_core.tools import tool
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
