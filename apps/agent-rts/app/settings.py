@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class AgentSettings(BaseSettings):
     DOMAIN: str = "RTS"
-    CATEGORY_FILTER: str = "RTS"
+    CATEGORY_FILTER: str = "rokan_technical_standard"  # Default: no filtering, use all categories
     REFUSAL_TEXT: str = "Tidak ditemukan dalam RTS."
     TOP_K: int = 16
     RERANK_ENABLED: bool = True

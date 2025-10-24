@@ -94,41 +94,56 @@ async def answer_rts_general(question: str) -> str:
             "params": {"nprobe": 10}
         }
         
+        # Available categories for reference
+        available_categories = ['ASSET', 'CIVIL', 'CONSTRUCTION', 'ELECTRICAL', 'FIRE', 'GOVERNANCE', 
+                               'INSTRUMENT', 'MATERIAL', 'PIPING', 'PROCESS', 'QA', 'ROTATING', 
+                               'STATIC', 'rokan_technical_standard']
+        
         # Debug: Print search parameters
         print(f"DEBUG: Searching collection: {settings.MILVUS_COLLECTION_NAME}")
         print(f"DEBUG: Embedding dimension: {len(embedding)}")
         print(f"DEBUG: Search limit: {settings.TOP_K}")
-        print(f"DEBUG: Filter: category == '{settings.CATEGORY_FILTER}' and access_rights == 'internal'")
+        print(f"DEBUG: Available categories: {available_categories}")
         
-        # Try search without filter first to see if collection has data
-        try:
-            results_no_filter = client.search(
-                collection_name=settings.MILVUS_COLLECTION_NAME,
-                data=[embedding],
-                anns_field="vector",
-                search_params=search_params,
-                limit=5,
-                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
-            )
-            print(f"DEBUG: Search without filter returned {len(results_no_filter[0]) if results_no_filter else 0} hits")
-            if results_no_filter and results_no_filter[0]:
-                print(f"DEBUG: Sample hit categories: {[hit.get('category') for hit in results_no_filter[0][:3]]}")
-                print(f"DEBUG: Sample hit access_rights: {[hit.get('access_rights') for hit in results_no_filter[0][:3]]}")
-        except Exception as e:
-            print(f"DEBUG: Search without filter failed: {e}")
-        
-        # Now try with filter
+        # Start with no filter to get maximum results
         results = client.search(
             collection_name=settings.MILVUS_COLLECTION_NAME,
             data=[embedding],
             anns_field="vector",
             search_params=search_params,
             limit=settings.TOP_K,
-            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-            filter=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
+            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
         )
         
-        print(f"DEBUG: Search with filter returned {len(results[0]) if results else 0} hits")
+        print(f"DEBUG: Search without filter returned {len(results[0]) if results else 0} hits")
+        
+        # If we have results, check if we need category filtering
+        if results and results[0]:
+            # Analyze categories in results
+            result_categories = [hit.get('category') for hit in results[0] if hit.get('category')]
+            unique_categories = list(set(result_categories))
+            print(f"DEBUG: Categories found in results: {unique_categories}")
+            
+            # Check if we should apply category filtering based on settings
+            # Category filtering is optional and only used to reduce scope if needed
+            if settings.CATEGORY_FILTER and settings.CATEGORY_FILTER != "rokan_technical_standard":
+                if settings.CATEGORY_FILTER in available_categories:
+                    print(f"DEBUG: Applying category filter: {settings.CATEGORY_FILTER}")
+                    # Re-search with category filter
+                    results = client.search(
+                        collection_name=settings.MILVUS_COLLECTION_NAME,
+                        data=[embedding],
+                        anns_field="vector",
+                        search_params=search_params,
+                        limit=settings.TOP_K,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                        filter=f'category == "{settings.CATEGORY_FILTER}"'
+                    )
+                    print(f"DEBUG: Search with category filter returned {len(results[0]) if results else 0} hits")
+                else:
+                    print(f"DEBUG: Category filter '{settings.CATEGORY_FILTER}' not in available categories, using all results")
+            else:
+                print("DEBUG: Using all results without category filtering")
         
         # Process results
         passages = []
@@ -143,65 +158,6 @@ async def answer_rts_general(question: str) -> str:
                     "score": hit.get("distance", 0)
                 })
         
-        # If no results with strict filter, try more relaxed filters
-        if not passages:
-            print("DEBUG: No results with strict filter, trying relaxed filters...")
-            
-            # Try without access_rights filter
-            try:
-                results_relaxed = client.search(
-                    collection_name=settings.MILVUS_COLLECTION_NAME,
-                    data=[embedding],
-                    anns_field="vector",
-                    search_params=search_params,
-                    limit=settings.TOP_K,
-                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-                    filter=f'category == "{settings.CATEGORY_FILTER}"'
-                )
-                print(f"DEBUG: Search with category-only filter returned {len(results_relaxed[0]) if results_relaxed else 0} hits")
-                
-                if results_relaxed and results_relaxed[0]:
-                    for hits in results_relaxed:
-                        for hit in hits:
-                            passages.append({
-                                "id": hit.get("id"),
-                                "text": hit.get("text"),
-                                "document_id": hit.get("document_id"),
-                                "document_name": hit.get("document_name"),
-                                "number_page": hit.get("number_page"),
-                                "score": hit.get("distance", 0)
-                            })
-            except Exception as e:
-                print(f"DEBUG: Relaxed filter search failed: {e}")
-            
-            # If still no results, try without any filter
-            if not passages:
-                print("DEBUG: Still no results, trying without any filter...")
-                try:
-                    results_no_filter = client.search(
-                        collection_name=settings.MILVUS_COLLECTION_NAME,
-                        data=[embedding],
-                        anns_field="vector",
-                        search_params=search_params,
-                        limit=settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
-                    )
-                    print(f"DEBUG: Search without any filter returned {len(results_no_filter[0]) if results_no_filter else 0} hits")
-                    
-                    if results_no_filter and results_no_filter[0]:
-                        for hits in results_no_filter:
-                            for hit in hits:
-                                passages.append({
-                                    "id": hit.get("id"),
-                                    "text": hit.get("text"),
-                                    "document_id": hit.get("document_id"),
-                                    "document_name": hit.get("document_name"),
-                                    "number_page": hit.get("number_page"),
-                                    "score": hit.get("distance", 0)
-                                })
-                except Exception as e:
-                    print(f"DEBUG: No-filter search failed: {e}")
-        
         if not passages:
             return orjson.dumps({
                 "domain": "RTS",
@@ -211,11 +167,8 @@ async def answer_rts_general(question: str) -> str:
                     "mode": "pymilvus_search",
                     "hits": 0,
                     "collection": settings.MILVUS_COLLECTION_NAME,
-                    "filters_tried": [
-                        f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"',
-                        f'category == "{settings.CATEGORY_FILTER}"',
-                        "no_filter"
-                    ],
+                    "search_strategy": "no_filter_primary",
+                    "available_categories": available_categories,
                     "embedding_dimension": len(embedding),
                     "search_limit": settings.TOP_K
                 }
@@ -226,7 +179,16 @@ async def answer_rts_general(question: str) -> str:
         citations = []
         seen_citations = set()
         
-        for passage in passages[:settings.MAX_CONTEXT]:
+        # Filter passages for specific keywords if question is about specific terms
+        relevant_passages = passages[:settings.MAX_CONTEXT]
+        if "bil" in question.lower():
+            # Prioritize passages containing "bil" or related terms
+            bil_passages = [p for p in passages if "bil" in p.get("text", "").lower()]
+            if bil_passages:
+                relevant_passages = bil_passages[:settings.MAX_CONTEXT]
+                print(f"DEBUG: Found {len(bil_passages)} passages containing 'bil'")
+        
+        for passage in relevant_passages:
             # Extract citation
             doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
             page = passage.get("number_page")
@@ -246,18 +208,26 @@ async def answer_rts_general(question: str) -> str:
         # Generate answer using LLM
         system_prompt = (
             "Anda adalah asisten teknis yang ahli dalam standar RTS. "
-            "Jawab pertanyaan berdasarkan konteks yang diberikan. "
+            "Jawab pertanyaan secara SPESIFIK dan LANGSUNG berdasarkan konteks yang diberikan. "
+            "JANGAN berikan ringkasan umum atau daftar dokumen. "
+            "Fokus pada jawaban spesifik yang diminta. "
             "Gunakan bahasa Indonesia yang formal dan teknis. "
             "Sertakan sitasi pada setiap pernyataan faktual. "
-            f"Jika bukti lemah, balas: {settings.REFUSAL_TEXT}"
+            f"Jika tidak menemukan informasi spesifik yang diminta, balas: {settings.REFUSAL_TEXT}"
         )
         
         user_prompt = (
-            f"Pertanyaan: {question}\n"
-            f"Konteks (maks {settings.MAX_CONTEXT} potongan):\n{context}\n"
-            f"Gaya: {settings.STYLE}\n"
-            f"Instruksi: Jawab ringkas, bahasa Indonesia. Sertakan sitasi pada setiap pernyataan faktual. "
-            f"Jika bukti lemah, balas {settings.REFUSAL_TEXT}."
+            f"PERTANYAAN SPESIFIK: {question}\n\n"
+            f"KONTEKS YANG TERSEDIA:\n{context}\n\n"
+            f"INSTRUKSI PENTING:\n"
+            f"- Jawab PERTANYAAN SPESIFIK yang diminta, bukan ringkasan umum\n"
+            f"- Jika ditanya tentang nilai/nilai spesifik, berikan nilai yang tepat\n"
+            f"- Jika ditanya tentang prosedur, berikan langkah-langkah spesifik\n"
+            f"- JANGAN buat daftar dokumen atau ringkasan\n"
+            f"- Fokus pada jawaban yang diminta\n"
+            f"- Gunakan bahasa Indonesia formal dan teknis\n"
+            f"- Sertakan sitasi pada setiap pernyataan faktual\n"
+            f"- Jika tidak ada informasi spesifik, balas: {settings.REFUSAL_TEXT}"
         )
         
         llm_payload = {
