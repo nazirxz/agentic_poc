@@ -72,11 +72,15 @@ async def answer_stk_tkpa(question: str) -> str:
 
 
 system_prompt = (
-    "Anda Agent STK. Analisis pertanyaan dan pilih tool yang paling relevan. "
-    "Gunakan tool pedoman untuk panduan umum, TKO untuk prosedur kerja organisasi, "
-    "TKI untuk tata kerja individu, TKPA untuk instruksi alat. Tool auto akan memilih otomatis bila ragu. "
-    "Gunakan tool minimal satu kali dan jangan membuat jawaban sendiri. "
-    "Jawaban akhir wajib berupa JSON persis seperti yang dikembalikan tool, tanpa tambahan teks."
+    "Anda Agent STK. WAJIB gunakan tool untuk menjawab. "
+    "ATURAN:\n"
+    "1. Untuk panduan umum atau sapaan: gunakan tool 'answer_stk_auto'\n"
+    "2. Untuk prosedur kerja organisasi: gunakan tool 'answer_stk_tko'\n"
+    "3. Untuk tata kerja individu: gunakan tool 'answer_stk_tki'\n"
+    "4. Untuk instruksi alat: gunakan tool 'answer_stk_tkpa'\n"
+    "5. Jika ragu: gunakan tool 'answer_stk_auto'\n"
+    "6. WAJIB panggil tool minimal 1x - JANGAN jawab sendiri\n"
+    "7. Output akhir HANYA JSON dari tool tanpa teks tambahan."
 )
 
 agent_executor = create_react_agent(
@@ -102,6 +106,9 @@ async def act(payload: ActRequest) -> dict:
     try:
         result = await agent_executor.ainvoke({"messages": [("user", payload.question)]})
     except Exception as exc:  # pragma: no cover - defensive
+        import traceback
+        error_detail = f"Agent STK failure: {exc}\n{traceback.format_exc()}"
+        print(error_detail)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     messages = result.get("messages", [])
@@ -116,9 +123,13 @@ async def act(payload: ActRequest) -> dict:
     if not isinstance(content, str):
         content = str(content)
 
+    print(f"Agent STK response: {content}")
+
     try:
         payload_json = orjson.loads(content)
     except orjson.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail="Output agent tidak dapat dibaca sebagai JSON") from exc
+        error_msg = f"Output agent tidak dapat dibaca sebagai JSON. Content: {content[:500]}"
+        print(error_msg)
+        raise HTTPException(status_code=502, detail=error_msg) from exc
 
     return payload_json

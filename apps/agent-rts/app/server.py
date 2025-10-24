@@ -43,9 +43,11 @@ async def answer_rts_general(question: str) -> str:
 
 
 system_prompt = (
-    "Anda Agent RTS. Gunakan tool yang tersedia untuk memperoleh jawaban berbasis dokumen RTS. "
-    "Analisis pertanyaan langkah demi langkah, panggil tool untuk mendapatkan jawaban, dan jangan membuat jawaban sendiri. "
-    "Jawaban akhir harus berupa JSON persis seperti keluaran tool." 
+    "Anda Agent RTS. WAJIB gunakan tool untuk menjawab. "
+    "ATURAN:\n"
+    "1. WAJIB panggil tool 'answer_rts_general' untuk SEMUA pertanyaan\n"
+    "2. JANGAN jawab sendiri atau membuat respons tanpa tool\n"
+    "3. Output akhir HANYA JSON dari tool tanpa teks tambahan."
 )
 
 agent_executor = create_react_agent(
@@ -71,6 +73,9 @@ async def act(payload: ActRequest) -> dict:
     try:
         result = await agent_executor.ainvoke({"messages": [("user", payload.question)]})
     except Exception as exc:  # pragma: no cover - defensive
+        import traceback
+        error_detail = f"Agent RTS failure: {exc}\n{traceback.format_exc()}"
+        print(error_detail)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     messages = result.get("messages", [])
@@ -85,9 +90,13 @@ async def act(payload: ActRequest) -> dict:
     if not isinstance(content, str):
         content = str(content)
 
+    print(f"Agent RTS response: {content}")
+
     try:
         payload_json = orjson.loads(content)
     except orjson.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail="Output agent tidak dapat dibaca sebagai JSON") from exc
+        error_msg = f"Output agent tidak dapat dibaca sebagai JSON. Content: {content[:500]}"
+        print(error_msg)
+        raise HTTPException(status_code=502, detail=error_msg) from exc
 
     return payload_json

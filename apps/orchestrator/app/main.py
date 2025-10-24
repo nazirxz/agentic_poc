@@ -71,11 +71,14 @@ llm = ChatOllama(
 )
 
 system_prompt = (
-    "Anda adalah Orchestrator URBUDDY. Tugas Anda memilih agent yang tepat. "
-    "Gunakan tool STK untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman). "
-    "Gunakan tool RTS untuk pertanyaan mengenai standar teknis RTS. "
-    "Analisis langkah demi langkah sebelum memutuskan. "
-    "Pada jawaban akhir, tampilkan persis JSON yang dikembalikan agent tanpa tambahan kalimat." 
+    "Anda adalah Orchestrator URBUDDY. Tugas Anda WAJIB memilih dan memanggil tool agent yang tepat. "
+    "ATURAN PENTING:\n"
+    "1. WAJIB panggil tool STK untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman).\n"
+    "2. WAJIB panggil tool RTS untuk pertanyaan mengenai standar teknis RTS.\n"
+    "3. Jika tidak jelas, gunakan tool STK sebagai default.\n"
+    "4. JANGAN jawab sendiri - SELALU gunakan tool.\n"
+    "5. Untuk pertanyaan umum (sapaan/hello), gunakan tool STK.\n"
+    "6. Jawaban akhir HANYA JSON murni dari tool tanpa teks tambahan."
 )
 
 agent_executor = create_react_agent(
@@ -95,7 +98,10 @@ async def orchestrate(request: OrchestrationRequest) -> dict:
     try:
         result = await agent_executor.ainvoke({"messages": [("user", request.question)]})
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=500, detail=f"Orchestrator failure: {exc}") from exc
+        import traceback
+        error_detail = f"Orchestrator failure: {exc}\n{traceback.format_exc()}"
+        print(error_detail)  # Log to console
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     messages: List[Any] = result.get("messages", [])
     if not messages:
@@ -109,9 +115,14 @@ async def orchestrate(request: OrchestrationRequest) -> dict:
     if not isinstance(content, str):
         content = str(content)
 
+    # Debug logging
+    print(f"Agent response content: {content}")
+
     try:
         payload = orjson.loads(content)
     except orjson.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail="Failed to parse orchestrator output as JSON") from exc
+        error_msg = f"Failed to parse orchestrator output as JSON. Content: {content[:500]}"
+        print(error_msg)  # Log to console
+        raise HTTPException(status_code=502, detail=error_msg) from exc
 
     return payload
