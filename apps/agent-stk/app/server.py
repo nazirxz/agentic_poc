@@ -72,21 +72,24 @@ async def answer_stk_tkpa(question: str) -> str:
 
 
 system_prompt = (
-    "Anda Agent STK. WAJIB gunakan tool untuk menjawab. "
+    "Anda Agent STK. Pilih dan panggil SATU tool yang paling sesuai, HANYA SEKALI.\n\n"
+    "PILIHAN TOOL:\n"
+    "1. answer_stk_pedoman - untuk panduan/kebijakan umum\n"
+    "2. answer_stk_tko - untuk prosedur kerja organisasi\n"
+    "3. answer_stk_tki - untuk tata kerja individu\n"
+    "4. answer_stk_tkpa - untuk instruksi penggunaan alat\n"
+    "5. answer_stk_auto - jika tidak yakin (pilihan default)\n\n"
     "ATURAN:\n"
-    "1. Untuk panduan umum atau sapaan: gunakan tool 'answer_stk_auto'\n"
-    "2. Untuk prosedur kerja organisasi: gunakan tool 'answer_stk_tko'\n"
-    "3. Untuk tata kerja individu: gunakan tool 'answer_stk_tki'\n"
-    "4. Untuk instruksi alat: gunakan tool 'answer_stk_tkpa'\n"
-    "5. Jika ragu: gunakan tool 'answer_stk_auto'\n"
-    "6. WAJIB panggil tool minimal 1x - JANGAN jawab sendiri\n"
-    "7. Output akhir HANYA JSON dari tool tanpa teks tambahan."
+    "- Pilih SATU tool yang paling sesuai\n"
+    "- Panggil tool HANYA SEKALI\n"
+    "- Setelah dapat hasil, LANGSUNG return sebagai final answer\n"
+    "- Output adalah JSON murni dari tool"
 )
 
 agent_executor = create_react_agent(
     llm,
     [answer_stk_auto, answer_stk_pedoman, answer_stk_tko, answer_stk_tki, answer_stk_tkpa],
-    prompt=system_prompt,
+    state_modifier=system_prompt,
 )
 
 app = FastAPI()
@@ -104,7 +107,13 @@ async def healthz() -> dict[str, str]:
 @app.post("/act")
 async def act(payload: ActRequest) -> dict:
     try:
-        result = await agent_executor.ainvoke({"messages": [("user", payload.question)]})
+        result = await agent_executor.ainvoke(
+            {"messages": [("user", payload.question)]},
+            config={
+                "recursion_limit": 8,
+                "max_iterations": 3,
+            }
+        )
     except Exception as exc:  # pragma: no cover - defensive
         import traceback
         error_detail = f"Agent STK failure: {exc}\n{traceback.format_exc()}"

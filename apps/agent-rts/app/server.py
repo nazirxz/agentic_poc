@@ -43,17 +43,18 @@ async def answer_rts_general(question: str) -> str:
 
 
 system_prompt = (
-    "Anda Agent RTS. WAJIB gunakan tool untuk menjawab. "
+    "Anda Agent RTS. Panggil tool 'answer_rts_general' SATU KALI untuk mendapatkan jawaban.\n\n"
     "ATURAN:\n"
-    "1. WAJIB panggil tool 'answer_rts_general' untuk SEMUA pertanyaan\n"
-    "2. JANGAN jawab sendiri atau membuat respons tanpa tool\n"
-    "3. Output akhir HANYA JSON dari tool tanpa teks tambahan."
+    "- Panggil tool answer_rts_general HANYA SEKALI\n"
+    "- Setelah dapat hasil dari tool, LANGSUNG return sebagai final answer\n"
+    "- JANGAN panggil tool lagi setelah mendapat hasil\n"
+    "- Output adalah JSON murni dari tool"
 )
 
 agent_executor = create_react_agent(
     llm,
     [answer_rts_general],
-    prompt=system_prompt,
+    state_modifier=system_prompt,
 )
 
 app = FastAPI()
@@ -71,7 +72,13 @@ async def healthz() -> dict[str, str]:
 @app.post("/act")
 async def act(payload: ActRequest) -> dict:
     try:
-        result = await agent_executor.ainvoke({"messages": [("user", payload.question)]})
+        result = await agent_executor.ainvoke(
+            {"messages": [("user", payload.question)]},
+            config={
+                "recursion_limit": 8,
+                "max_iterations": 3,
+            }
+        )
     except Exception as exc:  # pragma: no cover - defensive
         import traceback
         error_detail = f"Agent RTS failure: {exc}\n{traceback.format_exc()}"

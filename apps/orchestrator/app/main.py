@@ -79,19 +79,23 @@ llm = ChatOllama(
 )
 
 system_prompt = (
-    "Anda adalah Orchestrator URBUDDY. Tugas Anda WAJIB memilih dan memanggil tool agent yang tepat. "
-    "ATURAN PENTING:\n"
+    "Anda adalah Orchestrator URBUDDY. Tugas Anda memilih dan memanggil tool agent yang tepat SATU KALI SAJA.\n\n"
+    "ATURAN ROUTING:\n"
     "1. Untuk sapaan, obrolan umum, pertanyaan tentang kemampuan sistem → call_general_agent\n"
     "2. Untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman, prosedur kerja) → call_stk_agent\n"
-    "3. Untuk pertanyaan standar teknis RTS → call_rts_agent\n"
-    "4. WAJIB panggil tool - JANGAN jawab sendiri\n"
-    "5. Jawaban akhir HANYA JSON murni dari tool tanpa teks tambahan."
+    "3. Untuk pertanyaan standar teknis RTS → call_rts_agent\n\n"
+    "ATURAN PENTING:\n"
+    "- Pilih SATU tool yang paling sesuai\n"
+    "- Panggil tool HANYA SEKALI\n"
+    "- Setelah dapat hasil dari tool, LANGSUNG return hasilnya sebagai final answer\n"
+    "- JANGAN panggil tool kedua kali\n"
+    "- Output akhir adalah JSON murni dari tool"
 )
 
 agent_executor = create_react_agent(
     llm,
     [call_general_agent, call_stk_agent, call_rts_agent],
-    prompt=system_prompt,
+    state_modifier=system_prompt,
 )
 
 
@@ -103,7 +107,14 @@ async def healthz() -> dict[str, str]:
 @app.post("/orchestrate")
 async def orchestrate(request: OrchestrationRequest) -> dict:
     try:
-        result = await agent_executor.ainvoke({"messages": [("user", request.question)]})
+        # Tambahkan recursion_limit dan konfigurasi lainnya
+        result = await agent_executor.ainvoke(
+            {"messages": [("user", request.question)]},
+            config={
+                "recursion_limit": 10,  # Batasi maksimal iterasi
+                "max_iterations": 5,     # Maksimal 5 iterasi tool calls
+            }
+        )
     except Exception as exc:  # pragma: no cover - defensive
         import traceback
         error_detail = f"Orchestrator failure: {exc}\n{traceback.format_exc()}"
