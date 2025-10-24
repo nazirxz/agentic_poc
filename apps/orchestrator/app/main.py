@@ -16,7 +16,7 @@ class OrchestratorSettings(BaseSettings):
     AGENT_RTS_URL: str = "http://localhost:7002/act"
     AGENT_GENERAL_URL: str = "http://localhost:7003/chat"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5"
+    OLLAMA_MODEL: str = "qwen3:0.6b"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[1] / ".env",
