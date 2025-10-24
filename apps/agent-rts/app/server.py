@@ -73,6 +73,18 @@ async def answer_rts_general(question: str) -> str:
         # Initialize Milvus client
         client = MilvusClient(uri=settings.MILVUS_CONNECTION_URI)
         
+        # Debug: Check collection info
+        try:
+            collection_info = client.describe_collection(settings.MILVUS_COLLECTION_NAME)
+            print(f"DEBUG: Collection schema: {collection_info}")
+            
+            # Check collection stats
+            stats = client.get_collection_stats(settings.MILVUS_COLLECTION_NAME)
+            print(f"DEBUG: Collection stats: {stats}")
+            
+        except Exception as e:
+            print(f"DEBUG: Could not get collection info: {e}")
+        
         # Generate embedding for the question using Ollama
         embedding = await _generate_embedding(question)
         
@@ -82,6 +94,30 @@ async def answer_rts_general(question: str) -> str:
             "params": {"nprobe": 10}
         }
         
+        # Debug: Print search parameters
+        print(f"DEBUG: Searching collection: {settings.MILVUS_COLLECTION_NAME}")
+        print(f"DEBUG: Embedding dimension: {len(embedding)}")
+        print(f"DEBUG: Search limit: {settings.TOP_K}")
+        print(f"DEBUG: Filter: category == '{settings.CATEGORY_FILTER}' and access_rights == 'internal'")
+        
+        # Try search without filter first to see if collection has data
+        try:
+            results_no_filter = client.search(
+                collection_name=settings.MILVUS_COLLECTION_NAME,
+                data=[embedding],
+                anns_field="vector",
+                search_params=search_params,
+                limit=5,
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
+            )
+            print(f"DEBUG: Search without filter returned {len(results_no_filter[0]) if results_no_filter else 0} hits")
+            if results_no_filter and results_no_filter[0]:
+                print(f"DEBUG: Sample hit categories: {[hit.get('category') for hit in results_no_filter[0][:3]]}")
+                print(f"DEBUG: Sample hit access_rights: {[hit.get('access_rights') for hit in results_no_filter[0][:3]]}")
+        except Exception as e:
+            print(f"DEBUG: Search without filter failed: {e}")
+        
+        # Now try with filter
         results = client.search(
             collection_name=settings.MILVUS_COLLECTION_NAME,
             data=[embedding],
@@ -91,6 +127,8 @@ async def answer_rts_general(question: str) -> str:
             output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
             filter=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
         )
+        
+        print(f"DEBUG: Search with filter returned {len(results[0]) if results else 0} hits")
         
         # Process results
         passages = []
@@ -105,6 +143,65 @@ async def answer_rts_general(question: str) -> str:
                     "score": hit.get("distance", 0)
                 })
         
+        # If no results with strict filter, try more relaxed filters
+        if not passages:
+            print("DEBUG: No results with strict filter, trying relaxed filters...")
+            
+            # Try without access_rights filter
+            try:
+                results_relaxed = client.search(
+                    collection_name=settings.MILVUS_COLLECTION_NAME,
+                    data=[embedding],
+                    anns_field="vector",
+                    search_params=search_params,
+                    limit=settings.TOP_K,
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                    filter=f'category == "{settings.CATEGORY_FILTER}"'
+                )
+                print(f"DEBUG: Search with category-only filter returned {len(results_relaxed[0]) if results_relaxed else 0} hits")
+                
+                if results_relaxed and results_relaxed[0]:
+                    for hits in results_relaxed:
+                        for hit in hits:
+                            passages.append({
+                                "id": hit.get("id"),
+                                "text": hit.get("text"),
+                                "document_id": hit.get("document_id"),
+                                "document_name": hit.get("document_name"),
+                                "number_page": hit.get("number_page"),
+                                "score": hit.get("distance", 0)
+                            })
+            except Exception as e:
+                print(f"DEBUG: Relaxed filter search failed: {e}")
+            
+            # If still no results, try without any filter
+            if not passages:
+                print("DEBUG: Still no results, trying without any filter...")
+                try:
+                    results_no_filter = client.search(
+                        collection_name=settings.MILVUS_COLLECTION_NAME,
+                        data=[embedding],
+                        anns_field="vector",
+                        search_params=search_params,
+                        limit=settings.TOP_K,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
+                    )
+                    print(f"DEBUG: Search without any filter returned {len(results_no_filter[0]) if results_no_filter else 0} hits")
+                    
+                    if results_no_filter and results_no_filter[0]:
+                        for hits in results_no_filter:
+                            for hit in hits:
+                                passages.append({
+                                    "id": hit.get("id"),
+                                    "text": hit.get("text"),
+                                    "document_id": hit.get("document_id"),
+                                    "document_name": hit.get("document_name"),
+                                    "number_page": hit.get("number_page"),
+                                    "score": hit.get("distance", 0)
+                                })
+                except Exception as e:
+                    print(f"DEBUG: No-filter search failed: {e}")
+        
         if not passages:
             return orjson.dumps({
                 "domain": "RTS",
@@ -113,7 +210,14 @@ async def answer_rts_general(question: str) -> str:
                 "diagnostic": {
                     "mode": "pymilvus_search",
                     "hits": 0,
-                    "collection": settings.MILVUS_COLLECTION_NAME
+                    "collection": settings.MILVUS_COLLECTION_NAME,
+                    "filters_tried": [
+                        f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"',
+                        f'category == "{settings.CATEGORY_FILTER}"',
+                        "no_filter"
+                    ],
+                    "embedding_dimension": len(embedding),
+                    "search_limit": settings.TOP_K
                 }
             }).decode()
         
@@ -200,6 +304,10 @@ async def _generate_embedding(text: str) -> List[float]:
     try:
         from langchain_ollama import OllamaEmbeddings
         
+        print(f"DEBUG: Generating embedding for text: '{text[:100]}...'")
+        print(f"DEBUG: Using embedding model: {settings.OLLAMA_EMBEDDING_MODEL}")
+        print(f"DEBUG: Ollama base URL: {settings.OLLAMA_BASE_URL}")
+        
         # Initialize OllamaEmbeddings with BGE-M3 model
         embeddings = OllamaEmbeddings(
             model=settings.OLLAMA_EMBEDDING_MODEL,
@@ -208,10 +316,20 @@ async def _generate_embedding(text: str) -> List[float]:
         
         # Generate embedding using LangChain
         embedding_vector = embeddings.embed_query(text)
+        
+        print(f"DEBUG: Generated embedding dimension: {len(embedding_vector)}")
+        print(f"DEBUG: Embedding sample (first 5 values): {embedding_vector[:5]}")
+        
+        # Check if embedding is all zeros (indicates failure)
+        if all(v == 0.0 for v in embedding_vector):
+            print("WARNING: Generated embedding is all zeros!")
+        
         return embedding_vector
         
     except Exception as e:
         print(f"Embedding generation error: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         # Return zero vector as fallback (BGE-M3 has 3584 dimensions)
         return [0.0] * 3584
 
