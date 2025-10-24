@@ -13,10 +13,37 @@ from .settings import AgentSettings
 settings = AgentSettings()
 graph = build_graph(settings)
 
+# Create LLM with system prompt
+system_prompt = """Anda adalah Agent STK yang bertugas menjawab pertanyaan tentang dokumen STK (Sistem Tata Kerja).
+
+ATURAN PENTING:
+1. SELALU gunakan salah satu tool yang tersedia untuk menjawab pertanyaan
+2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
+3. Tool akan mengembalikan JSON dengan format: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
+5. Jika terjadi error, laporkan error tersebut
+
+PILIHAN TOOL:
+- answer_stk_auto: Untuk pertanyaan umum atau jika tidak yakin kategori dokumen
+- answer_stk_pedoman: Untuk kebijakan umum atau panduan
+- answer_stk_tko: Untuk prosedur kerja dan tata kerja organisasi
+- answer_stk_tki: Untuk tata kerja individu
+- answer_stk_tkpa: Untuk instruksi penggunaan alat/peralatan
+
+Contoh penggunaan:
+User: "bagaimana prosedur kerja organisasi?"
+Assistant: Saya akan mencari informasi tentang prosedur kerja organisasi di dokumen STK.
+Action: answer_stk_tko
+Action Input: {"question": "bagaimana prosedur kerja organisasi?"}
+Observation: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
+Final Answer: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
+"""
+
 llm = ChatOllama(
     base_url=settings.OLLAMA_BASE_URL,
     model=settings.OLLAMA_MODEL,
     temperature=0.2,
+    system=system_prompt,
 )
 
 
@@ -83,36 +110,9 @@ async def answer_stk_tkpa(question: str) -> str:
 
 
 # ReAct agent untuk STK dengan tool descriptions yang jelas
-# Tambahkan system prompt yang lebih eksplisit untuk memastikan penggunaan tool
-system_prompt = """Anda adalah Agent STK yang bertugas menjawab pertanyaan tentang dokumen STK (Sistem Tata Kerja).
-
-ATURAN PENTING:
-1. SELALU gunakan salah satu tool yang tersedia untuk menjawab pertanyaan
-2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
-3. Tool akan mengembalikan JSON dengan format: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
-4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
-5. Jika terjadi error, laporkan error tersebut
-
-PILIHAN TOOL:
-- answer_stk_auto: Untuk pertanyaan umum atau jika tidak yakin kategori dokumen
-- answer_stk_pedoman: Untuk kebijakan umum atau panduan
-- answer_stk_tko: Untuk prosedur kerja dan tata kerja organisasi
-- answer_stk_tki: Untuk tata kerja individu
-- answer_stk_tkpa: Untuk instruksi penggunaan alat/peralatan
-
-Contoh penggunaan:
-User: "bagaimana prosedur kerja organisasi?"
-Assistant: Saya akan mencari informasi tentang prosedur kerja organisasi di dokumen STK.
-Action: answer_stk_tko
-Action Input: {"question": "bagaimana prosedur kerja organisasi?"}
-Observation: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-Final Answer: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-"""
-
 agent_executor = create_react_agent(
     llm,
     [answer_stk_auto, answer_stk_pedoman, answer_stk_tko, answer_stk_tki, answer_stk_tkpa],
-    state_modifier=system_prompt,
 )
 
 app = FastAPI()

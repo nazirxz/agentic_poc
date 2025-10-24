@@ -13,10 +13,30 @@ from .settings import AgentSettings
 settings = AgentSettings()
 graph = build_graph(settings)
 
+# Create LLM with system prompt
+system_prompt = """Anda adalah Agent RTS yang bertugas menjawab pertanyaan tentang standar teknis RTS.
+
+ATURAN PENTING:
+1. SELALU gunakan tool answer_rts_general untuk menjawab pertanyaan
+2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
+3. Tool akan mengembalikan JSON dengan format: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
+4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
+5. Jika terjadi error, laporkan error tersebut
+
+Contoh penggunaan:
+User: "berapa nilai bil di rts?"
+Assistant: Saya akan mencari informasi tentang nilai bil di RTS menggunakan database dokumen.
+Action: answer_rts_general
+Action Input: {"question": "berapa nilai bil di rts?"}
+Observation: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
+Final Answer: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
+"""
+
 llm = ChatOllama(
     base_url=settings.OLLAMA_BASE_URL,
     model=settings.OLLAMA_MODEL,
     temperature=0.2,
+    system=system_prompt,
 )
 
 
@@ -45,29 +65,9 @@ async def answer_rts_general(question: str) -> str:
 
 
 # ReAct agent untuk RTS dengan tool description yang jelas
-# Tambahkan system prompt yang lebih eksplisit untuk memastikan penggunaan tool
-system_prompt = """Anda adalah Agent RTS yang bertugas menjawab pertanyaan tentang standar teknis RTS.
-
-ATURAN PENTING:
-1. SELALU gunakan tool answer_rts_general untuk menjawab pertanyaan
-2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
-3. Tool akan mengembalikan JSON dengan format: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
-4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
-5. Jika terjadi error, laporkan error tersebut
-
-Contoh penggunaan:
-User: "berapa nilai bil di rts?"
-Assistant: Saya akan mencari informasi tentang nilai bil di RTS menggunakan database dokumen.
-Action: answer_rts_general
-Action Input: {"question": "berapa nilai bil di rts?"}
-Observation: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-Final Answer: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-"""
-
 agent_executor = create_react_agent(
     llm,
     [answer_rts_general],
-    state_modifier=system_prompt,
 )
 
 app = FastAPI()
