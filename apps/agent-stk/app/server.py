@@ -226,24 +226,24 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
 
 
 async def _generate_embedding(text: str) -> List[float]:
-    """Generate embedding for text using Ollama"""
+    """Generate embedding for text using Ollama BGE-M3 model"""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/embeddings",
-                json={
-                    "model": settings.OLLAMA_MODEL,
-                    "prompt": text
-                },
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("embedding", [])
+        from langchain_ollama import OllamaEmbeddings
+        
+        # Initialize OllamaEmbeddings with BGE-M3 model
+        embeddings = OllamaEmbeddings(
+            model=settings.OLLAMA_EMBEDDING_MODEL,
+            base_url=settings.OLLAMA_BASE_URL
+        )
+        
+        # Generate embedding using LangChain
+        embedding_vector = embeddings.embed_query(text)
+        return embedding_vector
+        
     except Exception as e:
         print(f"Embedding generation error: {str(e)}")
-        # Return zero vector as fallback
-        return [0.0] * 1024
+        # Return zero vector as fallback (BGE-M3 has 3584 dimensions)
+        return [0.0] * 3584
 
 
 @tool

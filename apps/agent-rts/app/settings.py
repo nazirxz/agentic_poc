@@ -15,6 +15,7 @@ class AgentSettings(BaseSettings):
     STYLE: str = "teknis-formal"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3:0.6b"
+    OLLAMA_EMBEDDING_MODEL: str = "bge-m3"
 
     MILVUS_CONNECTION_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION_NAME: str = "rokan_technical_standard"
