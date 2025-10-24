@@ -154,6 +154,7 @@ async def answer_rts_general(question: str) -> str:
                         limit=10
                     )
                     print(f"DEBUG: Dynamic keyword search returned {len(keyword_results)} hits")
+                    print(f"DEBUG: Keyword results type: {type(keyword_results)}")
                 
                 # Additional search for technical specifications if relevant keywords found
                 technical_keywords = [kw for kw in extracted_keywords if kw in ["specification", "standard", "requirement", "technical"]]
@@ -166,7 +167,13 @@ async def answer_rts_general(question: str) -> str:
                             limit=5
                         )
                         print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
-                        keyword_results.extend(tech_results)
+                        
+                        # Safely extend keyword_results
+                        if isinstance(keyword_results, list):
+                            keyword_results.extend(tech_results)
+                        else:
+                            # Convert to list first
+                            keyword_results = list(keyword_results) + list(tech_results)
                     except Exception as e:
                         print(f"DEBUG: Technical specification search failed: {e}")
                 
@@ -226,22 +233,30 @@ async def answer_rts_general(question: str) -> str:
                     })
                     seen_ids.add(hit_id)
         
-        # Process keyword search results
-        for hit in keyword_results:
-            hit_id = hit.get("id")
-            if hit_id not in seen_ids:
-                passages.append({
-                    "id": hit_id,
-                    "text": hit.get("text"),
-                    "document_id": hit.get("document_id"),
-                    "document_name": hit.get("document_name"),
-                    "number_page": hit.get("number_page"),
-                    "score": 0.1,  # Lower score for keyword matches
-                    "source": "keyword",
-                    "keyword": hit.get("keyword", ""),
-                    "summary": hit.get("summary", "")
-                })
-                seen_ids.add(hit_id)
+        # Process keyword search results with error handling
+        try:
+            # Convert to list if it's a Milvus result object
+            if hasattr(keyword_results, '__iter__') and not isinstance(keyword_results, list):
+                keyword_results = list(keyword_results)
+            
+            for hit in keyword_results:
+                hit_id = hit.get("id")
+                if hit_id not in seen_ids:
+                    passages.append({
+                        "id": hit_id,
+                        "text": hit.get("text"),
+                        "document_id": hit.get("document_id"),
+                        "document_name": hit.get("document_name"),
+                        "number_page": hit.get("number_page"),
+                        "score": 0.1,  # Lower score for keyword matches
+                        "source": "keyword",
+                        "keyword": hit.get("keyword", ""),
+                        "summary": hit.get("summary", "")
+                    })
+                    seen_ids.add(hit_id)
+        except Exception as e:
+            print(f"DEBUG: Error processing keyword results: {e}")
+            # Continue without keyword results
         
         print(f"DEBUG: Combined results: {len(passages)} passages ({len([p for p in passages if p['source'] == 'vector'])} vector, {len([p for p in passages if p['source'] == 'keyword'])} keyword)")
         
