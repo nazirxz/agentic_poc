@@ -1,0 +1,80 @@
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python packaging artifacts
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+downloads/
+sdist/
+wheels/
+share/python-wheels/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+pip-wheel-metadata/
+
+# Dependencies and tooling caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.nox/
+.tox/
+.hypothesis/
+.benchmarks/
+.pyre/
+.pytype/
+
+# Test and coverage reports
+.coverage
+.coverage.*
+coverage.xml
+nose2-junit.xml
+nosetests.xml
+*.cover
+*.py,cover
+*.log
+htmlcov/
+
+# Project configuration secrets
+.env
+.env.*
+.secrets/
+.streamlit/secrets.toml
+
+# IDE / editor settings
+.idea/
+.vscode/
+
+# Data and database files
+*.db
+*.sqlite
+*.sqlite3
+*.h5
+*.parquet
+*.feather
+*.csv
+*.tsv
+*.bak
+logs/
+
+# Docker runtime artifacts
+*.pid
+*.seed
+*.pid.lock
+

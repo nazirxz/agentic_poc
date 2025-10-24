@@ -16,5 +16,6 @@ dependencies = [
     "langchain-community",
     "langchain-ollama",
     "langchain-core",
+    "pymilvus>=2.6.0",
 ]
 
