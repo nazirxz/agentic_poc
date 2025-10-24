@@ -5,7 +5,10 @@ from fastapi import FastAPI, HTTPException
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel
+from typing import TypedDict, List, Any
 
 from .graph import RAGState, build_graph
 from .settings import AgentSettings
@@ -75,7 +78,126 @@ async def answer_stk_auto(question: str) -> str:
     Use this if unsure about document category.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    return orjson.dumps(await run_rag(question)).decode()
+    # Direct vector search to Milvus
+    try:
+        import httpx
+        
+        # Prepare search payload
+        payload = {
+            "q": question,
+            "top_k": settings.TOP_K,
+            "filters": {
+                "category": settings.CATEGORY_FILTER,
+                "access_rights": "internal",
+            }
+        }
+        
+        # Search Milvus
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.MILVUS_RAG_URL}/search",
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+        
+        passages = data.get("passages") or data.get("results") or []
+        
+        # Process results
+        if not passages:
+            return orjson.dumps({
+                "domain": "STK",
+                "answer": settings.REFUSAL_TEXT,
+                "citations": [],
+                "diagnostic": {
+                    "mode": "vector_search",
+                    "hits": 0,
+                    "filters": payload["filters"]
+                }
+            }).decode()
+        
+        # Generate answer using LLM
+        context_lines = []
+        citations = []
+        seen_citations = set()
+        
+        for passage in passages[:settings.MAX_CONTEXT]:
+            # Extract citation
+            doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
+            page = passage.get("number_page") or passage.get("page") or passage.get("page_number")
+            page_str = str(page) if page is not None else "?"
+            citation = f"{doc_name} p.{page_str}"
+            
+            if citation not in seen_citations:
+                seen_citations.add(citation)
+                citations.append(citation)
+            
+            # Add to context
+            text = passage.get("text") or ""
+            context_lines.append(f"{doc_name} p.{page_str}: {text}")
+        
+        context = "\n\n".join(context_lines)
+        
+        # Generate answer using LLM
+        system_prompt = (
+            "Anda adalah asisten teknis yang ahli dalam dokumen STK (Sistem Tata Kerja). "
+            "Jawab pertanyaan berdasarkan konteks yang diberikan. "
+            "Gunakan bahasa Indonesia yang ringkas dan berbutir. "
+            "Sertakan sitasi pada setiap pernyataan faktual. "
+            f"Jika bukti lemah, balas: {settings.REFUSAL_TEXT}"
+        )
+        
+        user_prompt = (
+            f"Pertanyaan: {question}\n"
+            f"Konteks (maks {settings.MAX_CONTEXT} potongan):\n{context}\n"
+            f"Gaya: {settings.STYLE}\n"
+            f"Instruksi: Jawab ringkas, bahasa Indonesia. Sertakan sitasi pada setiap pernyataan faktual. "
+            f"Jika bukti lemah, balas {settings.REFUSAL_TEXT}."
+        )
+        
+        llm_payload = {
+            "model": settings.OLLAMA_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        
+        async with httpx.AsyncClient() as client:
+            llm_response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                json=llm_payload,
+                timeout=60,
+            )
+            llm_response.raise_for_status()
+            llm_data = llm_response.json()
+        
+        answer = llm_data["choices"][0]["message"]["content"]
+        
+        return orjson.dumps({
+            "domain": "STK",
+            "answer": answer,
+            "citations": citations,
+            "diagnostic": {
+                "mode": "vector_search",
+                "hits": len(passages),
+                "used_passages": len(context_lines),
+                "filters": payload["filters"]
+            }
+        }).decode()
+        
+    except Exception as e:
+        import traceback
+        error_detail = f"Vector search error: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        return orjson.dumps({
+            "domain": "STK",
+            "answer": f"Error: {str(e)}",
+            "citations": [],
+            "diagnostic": {"error": str(e)}
+        }).decode()
 
 
 @tool
@@ -83,7 +205,7 @@ async def answer_stk_pedoman(question: str) -> str:
     """MANDATORY tool to search PEDOMAN/MANUAL collection for general policy or guideline questions.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    return orjson.dumps(await run_rag(question, collection="pedoman")).decode()
+    return await _search_stk_collection(question, "pedoman")
 
 
 @tool
@@ -91,7 +213,7 @@ async def answer_stk_tko(question: str) -> str:
     """MANDATORY tool to search TKO (Tata Kerja Organisasi) collection for organizational work procedures.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    return orjson.dumps(await run_rag(question, collection="TKO")).decode()
+    return await _search_stk_collection(question, "TKO")
 
 
 @tool
@@ -99,7 +221,7 @@ async def answer_stk_tki(question: str) -> str:
     """MANDATORY tool to search TKI (Tata Kerja Individu) collection for individual work procedures.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    return orjson.dumps(await run_rag(question, collection="TKI")).decode()
+    return await _search_stk_collection(question, "TKI")
 
 
 @tool
@@ -107,14 +229,168 @@ async def answer_stk_tkpa(question: str) -> str:
     """MANDATORY tool to search TKPA (Tata Kerja Penggunaan Alat) collection for equipment usage instructions.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    return orjson.dumps(await run_rag(question, collection="TKPA")).decode()
+    return await _search_stk_collection(question, "TKPA")
 
 
-# ReAct agent untuk STK dengan tool descriptions yang jelas
-agent_executor = create_react_agent(
-    llm,
-    [answer_stk_auto, answer_stk_pedoman, answer_stk_tko, answer_stk_tki, answer_stk_tkpa],
-)
+# Helper function for STK collection search
+async def _search_stk_collection(question: str, collection: str) -> str:
+    """Search specific STK collection"""
+    try:
+        import httpx
+        
+        # Prepare search payload with collection filter
+        payload = {
+            "q": question,
+            "top_k": settings.TOP_K,
+            "filters": {
+                "category": settings.CATEGORY_FILTER,
+                "access_rights": "internal",
+                "doc_level_2": collection,  # Filter by collection
+            }
+        }
+        
+        # Search Milvus
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.MILVUS_RAG_URL}/search",
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+        
+        passages = data.get("passages") or data.get("results") or []
+        
+        # Process results
+        if not passages:
+            return orjson.dumps({
+                "domain": "STK",
+                "answer": settings.REFUSAL_TEXT,
+                "citations": [],
+                "diagnostic": {
+                    "mode": "vector_search",
+                    "collection": collection,
+                    "hits": 0,
+                    "filters": payload["filters"]
+                }
+            }).decode()
+        
+        # Generate answer using LLM
+        context_lines = []
+        citations = []
+        seen_citations = set()
+        
+        for passage in passages[:settings.MAX_CONTEXT]:
+            # Extract citation
+            doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
+            page = passage.get("number_page") or passage.get("page") or passage.get("page_number")
+            page_str = str(page) if page is not None else "?"
+            citation = f"{doc_name} p.{page_str}"
+            
+            if citation not in seen_citations:
+                seen_citations.add(citation)
+                citations.append(citation)
+            
+            # Add to context
+            text = passage.get("text") or ""
+            context_lines.append(f"{doc_name} p.{page_str}: {text}")
+        
+        context = "\n\n".join(context_lines)
+        
+        # Generate answer using LLM
+        system_prompt = (
+            f"Anda adalah asisten teknis yang ahli dalam dokumen STK {collection}. "
+            "Jawab pertanyaan berdasarkan konteks yang diberikan. "
+            "Gunakan bahasa Indonesia yang ringkas dan berbutir. "
+            "Sertakan sitasi pada setiap pernyataan faktual. "
+            f"Jika bukti lemah, balas: {settings.REFUSAL_TEXT}"
+        )
+        
+        user_prompt = (
+            f"Pertanyaan: {question}\n"
+            f"Konteks (maks {settings.MAX_CONTEXT} potongan):\n{context}\n"
+            f"Gaya: {settings.STYLE}\n"
+            f"Instruksi: Jawab ringkas, bahasa Indonesia. Sertakan sitasi pada setiap pernyataan faktual. "
+            f"Jika bukti lemah, balas {settings.REFUSAL_TEXT}."
+        )
+        
+        llm_payload = {
+            "model": settings.OLLAMA_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        
+        async with httpx.AsyncClient() as client:
+            llm_response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                json=llm_payload,
+                timeout=60,
+            )
+            llm_response.raise_for_status()
+            llm_data = llm_response.json()
+        
+        answer = llm_data["choices"][0]["message"]["content"]
+        
+        return orjson.dumps({
+            "domain": "STK",
+            "answer": answer,
+            "citations": citations,
+            "diagnostic": {
+                "mode": "vector_search",
+                "collection": collection,
+                "hits": len(passages),
+                "used_passages": len(context_lines),
+                "filters": payload["filters"]
+            }
+        }).decode()
+        
+    except Exception as e:
+        import traceback
+        error_detail = f"Vector search error for {collection}: {str(e)}\n{traceback.format_exc()}"
+        print(error_detail)
+        return orjson.dumps({
+            "domain": "STK",
+            "answer": f"Error: {str(e)}",
+            "citations": [],
+            "diagnostic": {"error": str(e), "collection": collection}
+        }).decode()
+
+
+# Custom agent state
+class AgentState(TypedDict):
+    messages: List[Any]
+    question: str
+
+# Custom agent executor that forces tool usage
+async def custom_agent_executor(state: AgentState) -> dict:
+    """Custom agent that ALWAYS uses the auto tool"""
+    question = state.get("question", "")
+    
+    # Always call the auto tool directly
+    try:
+        tool_result = await answer_stk_auto.ainvoke({"question": question})
+        return {"messages": [AIMessage(content=tool_result)]}
+    except Exception as e:
+        error_response = orjson.dumps({
+            "domain": "STK",
+            "answer": f"Error: {str(e)}",
+            "citations": [],
+            "diagnostic": {"error": str(e)}
+        }).decode()
+        return {"messages": [AIMessage(content=error_response)]}
+
+# Create custom graph
+def create_custom_agent():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("agent", custom_agent_executor)
+    workflow.set_entry_point("agent")
+    workflow.add_edge("agent", END)
+    return workflow.compile()
+
+agent_executor = create_custom_agent()
 
 app = FastAPI()
 
@@ -131,13 +407,11 @@ async def healthz() -> dict[str, str]:
 @app.post("/act")
 async def act(payload: ActRequest) -> dict:
     try:
-        result = await agent_executor.ainvoke(
-            {"messages": [("user", payload.question)]},
-            config={
-                "recursion_limit": 8,
-                "max_iterations": 3,
-            }
-        )
+        # Use custom agent that forces tool usage
+        result = await agent_executor.ainvoke({
+            "question": payload.question,
+            "messages": []
+        })
     except Exception as exc:  # pragma: no cover - defensive
         import traceback
         error_detail = f"Agent STK failure: {exc}\n{traceback.format_exc()}"
