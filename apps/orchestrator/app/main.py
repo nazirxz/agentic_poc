@@ -136,11 +136,19 @@ async def orchestrate(request: OrchestrationRequest) -> dict:
     # Debug logging
     print(f"Agent response content: {content}")
 
+    # Try to parse as JSON first
     try:
         payload = orjson.loads(content)
-    except orjson.JSONDecodeError as exc:
-        error_msg = f"Failed to parse orchestrator output as JSON. Content: {content[:500]}"
-        print(error_msg)  # Log to console
-        raise HTTPException(status_code=502, detail=error_msg) from exc
-
-    return payload
+        return payload
+    except orjson.JSONDecodeError:
+        # If not JSON, treat as plain text response and wrap it in expected format
+        print(f"Non-JSON response detected, wrapping as general response")
+        return {
+            "domain": "GENERAL",
+            "answer": content,
+            "citations": [],
+            "diagnostic": {
+                "mode": "orchestrator_fallback",
+                "original_content": content[:200] + "..." if len(content) > 200 else content
+            }
+        }
