@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import orjson
+import httpx
 from fastapi import FastAPI, HTTPException
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
@@ -9,6 +10,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel
 from typing import TypedDict, List, Any
+from pymilvus import MilvusClient, DataType
 
 from .graph import RAGState, build_graph
 from .settings import AgentSettings
@@ -66,46 +68,56 @@ async def answer_rts_general(question: str) -> str:
     This tool MUST be used for ALL questions about RTS.
     Returns JSON: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    # Direct vector search to Milvus
+    # Try vector search using pymilvus, fallback to LLM-only if Milvus unavailable
     try:
-        import httpx
+        # Initialize Milvus client
+        client = MilvusClient(uri=settings.MILVUS_CONNECTION_URI)
         
-        # Prepare search payload
-        payload = {
-            "q": question,
-            "top_k": settings.TOP_K,
-            "filters": {
-                "category": settings.CATEGORY_FILTER,
-                "access_rights": "internal",
-            }
+        # Generate embedding for the question using Ollama
+        embedding = await _generate_embedding(question)
+        
+        # Search Milvus collection
+        search_params = {
+            "metric_type": "L2",
+            "params": {"nprobe": 10}
         }
         
-        # Search Milvus
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{settings.MILVUS_RAG_URL}/search",
-                json=payload,
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
-        
-        passages = data.get("passages") or data.get("results") or []
+        results = client.search(
+            collection_name=settings.MILVUS_COLLECTION_NAME,
+            data=[embedding],
+            anns_field="vector",
+            param=search_params,
+            limit=settings.TOP_K,
+            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+            expr=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
+        )
         
         # Process results
+        passages = []
+        for hits in results:
+            for hit in hits:
+                passages.append({
+                    "id": hit.get("id"),
+                    "text": hit.get("text"),
+                    "document_id": hit.get("document_id"),
+                    "document_name": hit.get("document_name"),
+                    "number_page": hit.get("number_page"),
+                    "score": hit.get("distance", 0)
+                })
+        
         if not passages:
             return orjson.dumps({
                 "domain": "RTS",
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                    "mode": "vector_search",
+                    "mode": "pymilvus_search",
                     "hits": 0,
-                    "filters": payload["filters"]
+                    "collection": settings.MILVUS_COLLECTION_NAME
                 }
             }).decode()
         
-        # Generate answer using LLM
+        # Generate answer using LLM with context
         context_lines = []
         citations = []
         seen_citations = set()
@@ -113,7 +125,7 @@ async def answer_rts_general(question: str) -> str:
         for passage in passages[:settings.MAX_CONTEXT]:
             # Extract citation
             doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
-            page = passage.get("number_page") or passage.get("page") or passage.get("page_number")
+            page = passage.get("number_page")
             page_str = str(page) if page is not None else "?"
             citation = f"{doc_name} p.{page_str}"
             
@@ -169,22 +181,92 @@ async def answer_rts_general(question: str) -> str:
             "answer": answer,
             "citations": citations,
             "diagnostic": {
-                "mode": "vector_search",
+                "mode": "pymilvus_search",
                 "hits": len(passages),
                 "used_passages": len(context_lines),
-                "filters": payload["filters"]
+                "collection": settings.MILVUS_COLLECTION_NAME
             }
         }).decode()
         
     except Exception as e:
         import traceback
-        error_detail = f"Vector search error: {str(e)}\n{traceback.format_exc()}"
+        error_detail = f"Pymilvus search error: {str(e)}\n{traceback.format_exc()}"
         print(error_detail)
+        return await _fallback_llm_response(question, "RTS")
+
+
+async def _generate_embedding(text: str) -> List[float]:
+    """Generate embedding for text using Ollama"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/embeddings",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": text
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("embedding", [])
+    except Exception as e:
+        print(f"Embedding generation error: {str(e)}")
+        # Return zero vector as fallback
+        return [0.0] * 1024
+
+
+async def _fallback_llm_response(question: str, domain: str) -> str:
+    """Fallback LLM response when vector search is unavailable"""
+    try:
+        import httpx
+        
+        system_prompt = (
+            f"Anda adalah asisten teknis yang ahli dalam dokumen {domain}. "
+            "Jawab pertanyaan berdasarkan pengetahuan umum tentang {domain}. "
+            "Gunakan bahasa Indonesia yang formal dan teknis. "
+            f"Jika tidak yakin, balas: Tidak ditemukan dalam {domain}."
+        )
+        
+        user_prompt = f"Pertanyaan: {question}\n\nJawab berdasarkan pengetahuan umum tentang {domain}."
+        
+        llm_payload = {
+            "model": settings.OLLAMA_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        
+        async with httpx.AsyncClient() as client:
+            llm_response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                json=llm_payload,
+                timeout=60,
+            )
+            llm_response.raise_for_status()
+            llm_data = llm_response.json()
+        
+        answer = llm_data["choices"][0]["message"]["content"]
+        
         return orjson.dumps({
-            "domain": "RTS",
-            "answer": f"Error: {str(e)}",
+            "domain": domain,
+            "answer": answer,
             "citations": [],
-            "diagnostic": {"error": str(e)}
+            "diagnostic": {
+                "mode": "llm_fallback",
+                "reason": "milvus_unavailable",
+                "model": settings.OLLAMA_MODEL
+            }
+        }).decode()
+        
+    except Exception as e:
+        return orjson.dumps({
+            "domain": domain,
+            "answer": f"Maaf, terjadi kesalahan dalam memproses pertanyaan Anda: {str(e)}",
+            "citations": [],
+            "diagnostic": {"error": str(e), "mode": "error_fallback"}
         }).decode()
 
 

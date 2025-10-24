@@ -15,7 +15,13 @@ class AgentSettings(BaseSettings):
     STYLE: str = "ringkas-berbutir"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3:0.6b"
-    MILVUS_RAG_URL: str = "http://localhost:19537"
+    MILVUS_CONNECTION_URI: str = "http://localhost:19530"
+    MILVUS_COLLECTIONS: dict = {
+        "tko": "tko",           # Tata Kerja Organisasi - prosedur
+        "tki": "tki",           # Tata Kerja Individual - instruksi kerja
+        "tkpa": "tkpa",         # Tata Kerja Penggunaan Alat - instruksi kerja
+        "pedoman": "pedoman"    # Manual
+    }
     RERANK_URL: str = "http://localhost:8082"
 
     model_config = SettingsConfigDict(

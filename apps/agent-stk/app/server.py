@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import orjson
+import httpx
 from fastapi import FastAPI, HTTPException
 from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
@@ -9,6 +10,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel
 from typing import TypedDict, List, Any
+from pymilvus import MilvusClient, DataType
 
 from .graph import RAGState, build_graph
 from .settings import AgentSettings
@@ -78,42 +80,68 @@ async def answer_stk_auto(question: str) -> str:
     Use this if unsure about document category.
     Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
-    # Direct vector search to Milvus
+    return await _search_stk_collection(question, None)
+
+
+async def _search_stk_collection(question: str, collection: str | None) -> str:
+    """Search STK collection using pymilvus"""
     try:
-        import httpx
+        # Initialize Milvus client
+        client = MilvusClient(uri=settings.MILVUS_CONNECTION_URI)
         
-        # Prepare search payload
-        payload = {
-            "q": question,
-            "top_k": settings.TOP_K,
-            "filters": {
-                "category": settings.CATEGORY_FILTER,
-                "access_rights": "internal",
-            }
+        # Generate embedding for the question using Ollama
+        embedding = await _generate_embedding(question)
+        
+        # Search Milvus collection
+        search_params = {
+            "metric_type": "L2",
+            "params": {"nprobe": 10}
         }
         
-        # Search Milvus
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{settings.MILVUS_RAG_URL}/search",
-                json=payload,
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
+        # Determine collection name
+        if collection and collection in settings.MILVUS_COLLECTIONS:
+            collection_name = settings.MILVUS_COLLECTIONS[collection]
+        else:
+            # For auto search, search all STK collections
+            collection_name = "tko"  # Default to TKO for auto search
         
-        passages = data.get("passages") or data.get("results") or []
+        # Build filter expression
+        filter_expr = f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
+        
+        results = client.search(
+            collection_name=collection_name,
+            data=[embedding],
+            anns_field="vector",
+            param=search_params,
+            limit=settings.TOP_K,
+            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+            expr=filter_expr
+        )
         
         # Process results
+        passages = []
+        for hits in results:
+            for hit in hits:
+                passages.append({
+                    "id": hit.get("id"),
+                    "text": hit.get("text"),
+                    "document_id": hit.get("document_id"),
+                    "document_name": hit.get("document_name"),
+                    "number_page": hit.get("number_page"),
+                    "doc_level_2": hit.get("doc_level_2"),
+                    "score": hit.get("distance", 0)
+                })
+        
         if not passages:
             return orjson.dumps({
                 "domain": "STK",
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                    "mode": "vector_search",
+                    "mode": "pymilvus_search",
+                    "collection": collection,
                     "hits": 0,
-                    "filters": payload["filters"]
+                    "collection_name": collection_name
                 }
             }).decode()
         
@@ -125,7 +153,7 @@ async def answer_stk_auto(question: str) -> str:
         for passage in passages[:settings.MAX_CONTEXT]:
             # Extract citation
             doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
-            page = passage.get("number_page") or passage.get("page") or passage.get("page_number")
+            page = passage.get("number_page")
             page_str = str(page) if page is not None else "?"
             citation = f"{doc_name} p.{page_str}"
             
@@ -140,8 +168,9 @@ async def answer_stk_auto(question: str) -> str:
         context = "\n\n".join(context_lines)
         
         # Generate answer using LLM
+        collection_desc = f" {collection}" if collection else ""
         system_prompt = (
-            "Anda adalah asisten teknis yang ahli dalam dokumen STK (Sistem Tata Kerja). "
+            f"Anda adalah asisten teknis yang ahli dalam dokumen STK{collection_desc}. "
             "Jawab pertanyaan berdasarkan konteks yang diberikan. "
             "Gunakan bahasa Indonesia yang ringkas dan berbutir. "
             "Sertakan sitasi pada setiap pernyataan faktual. "
@@ -181,23 +210,40 @@ async def answer_stk_auto(question: str) -> str:
             "answer": answer,
             "citations": citations,
             "diagnostic": {
-                "mode": "vector_search",
+                "mode": "pymilvus_search",
+                "collection": collection,
                 "hits": len(passages),
                 "used_passages": len(context_lines),
-                "filters": payload["filters"]
+                "collection_name": collection_name
             }
         }).decode()
         
     except Exception as e:
         import traceback
-        error_detail = f"Vector search error: {str(e)}\n{traceback.format_exc()}"
+        error_detail = f"Pymilvus search error for {collection}: {str(e)}\n{traceback.format_exc()}"
         print(error_detail)
-        return orjson.dumps({
-            "domain": "STK",
-            "answer": f"Error: {str(e)}",
-            "citations": [],
-            "diagnostic": {"error": str(e)}
-        }).decode()
+        return await _fallback_llm_response(question, "STK")
+
+
+async def _generate_embedding(text: str) -> List[float]:
+    """Generate embedding for text using Ollama"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/embeddings",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": text
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("embedding", [])
+    except Exception as e:
+        print(f"Embedding generation error: {str(e)}")
+        # Return zero vector as fallback
+        return [0.0] * 1024
 
 
 @tool
@@ -232,87 +278,18 @@ async def answer_stk_tkpa(question: str) -> str:
     return await _search_stk_collection(question, "TKPA")
 
 
-# Helper function for STK collection search
-async def _search_stk_collection(question: str, collection: str) -> str:
-    """Search specific STK collection"""
+async def _fallback_llm_response(question: str, domain: str) -> str:
+    """Fallback LLM response when vector search is unavailable"""
     try:
-        import httpx
         
-        # Prepare search payload with collection filter
-        payload = {
-            "q": question,
-            "top_k": settings.TOP_K,
-            "filters": {
-                "category": settings.CATEGORY_FILTER,
-                "access_rights": "internal",
-                "doc_level_2": collection,  # Filter by collection
-            }
-        }
-        
-        # Search Milvus
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{settings.MILVUS_RAG_URL}/search",
-                json=payload,
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
-        
-        passages = data.get("passages") or data.get("results") or []
-        
-        # Process results
-        if not passages:
-            return orjson.dumps({
-                "domain": "STK",
-                "answer": settings.REFUSAL_TEXT,
-                "citations": [],
-                "diagnostic": {
-                    "mode": "vector_search",
-                    "collection": collection,
-                    "hits": 0,
-                    "filters": payload["filters"]
-                }
-            }).decode()
-        
-        # Generate answer using LLM
-        context_lines = []
-        citations = []
-        seen_citations = set()
-        
-        for passage in passages[:settings.MAX_CONTEXT]:
-            # Extract citation
-            doc_name = passage.get("document_name") or passage.get("document_id") or "Unknown"
-            page = passage.get("number_page") or passage.get("page") or passage.get("page_number")
-            page_str = str(page) if page is not None else "?"
-            citation = f"{doc_name} p.{page_str}"
-            
-            if citation not in seen_citations:
-                seen_citations.add(citation)
-                citations.append(citation)
-            
-            # Add to context
-            text = passage.get("text") or ""
-            context_lines.append(f"{doc_name} p.{page_str}: {text}")
-        
-        context = "\n\n".join(context_lines)
-        
-        # Generate answer using LLM
         system_prompt = (
-            f"Anda adalah asisten teknis yang ahli dalam dokumen STK {collection}. "
-            "Jawab pertanyaan berdasarkan konteks yang diberikan. "
+            f"Anda adalah asisten teknis yang ahli dalam dokumen {domain}. "
+            "Jawab pertanyaan berdasarkan pengetahuan umum tentang {domain}. "
             "Gunakan bahasa Indonesia yang ringkas dan berbutir. "
-            "Sertakan sitasi pada setiap pernyataan faktual. "
-            f"Jika bukti lemah, balas: {settings.REFUSAL_TEXT}"
+            f"Jika tidak yakin, balas: Tidak ditemukan dalam {domain}."
         )
         
-        user_prompt = (
-            f"Pertanyaan: {question}\n"
-            f"Konteks (maks {settings.MAX_CONTEXT} potongan):\n{context}\n"
-            f"Gaya: {settings.STYLE}\n"
-            f"Instruksi: Jawab ringkas, bahasa Indonesia. Sertakan sitasi pada setiap pernyataan faktual. "
-            f"Jika bukti lemah, balas {settings.REFUSAL_TEXT}."
-        )
+        user_prompt = f"Pertanyaan: {question}\n\nJawab berdasarkan pengetahuan umum tentang {domain}."
         
         llm_payload = {
             "model": settings.OLLAMA_MODEL,
@@ -335,27 +312,22 @@ async def _search_stk_collection(question: str, collection: str) -> str:
         answer = llm_data["choices"][0]["message"]["content"]
         
         return orjson.dumps({
-            "domain": "STK",
+            "domain": domain,
             "answer": answer,
-            "citations": citations,
+            "citations": [],
             "diagnostic": {
-                "mode": "vector_search",
-                "collection": collection,
-                "hits": len(passages),
-                "used_passages": len(context_lines),
-                "filters": payload["filters"]
+                "mode": "llm_fallback",
+                "reason": "milvus_unavailable",
+                "model": settings.OLLAMA_MODEL
             }
         }).decode()
         
     except Exception as e:
-        import traceback
-        error_detail = f"Vector search error for {collection}: {str(e)}\n{traceback.format_exc()}"
-        print(error_detail)
         return orjson.dumps({
-            "domain": "STK",
-            "answer": f"Error: {str(e)}",
+            "domain": domain,
+            "answer": f"Maaf, terjadi kesalahan dalam memproses pertanyaan Anda: {str(e)}",
             "citations": [],
-            "diagnostic": {"error": str(e), "collection": collection}
+            "diagnostic": {"error": str(e), "mode": "error_fallback"}
         }).decode()
 
 

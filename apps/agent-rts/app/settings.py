@@ -16,7 +16,8 @@ class AgentSettings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3:0.6b"
 
-    MILVUS_RAG_URL: str = "http://localhost:19537"
+    MILVUS_CONNECTION_URI: str = "http://localhost:19530"
+    MILVUS_COLLECTION_NAME: str = "rokan_technical_standard"
     RERANK_URL: str = "http://localhost:8082"
 
     model_config = SettingsConfigDict(
