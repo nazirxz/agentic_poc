@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import orjson
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -245,9 +246,9 @@ async def answer_rts_general(question: str) -> str:
         citations = []
         seen_citations = set()
         
-        # Use top passages after reranking
-        relevant_passages = passages[:settings.MAX_CONTEXT]
-        print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking")
+        # Use top passages after reranking, but limit context length to prevent timeout
+        relevant_passages = passages[:min(settings.MAX_CONTEXT, 4)]  # Reduce to 4 passages max
+        print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking (limited to prevent timeout)")
         
         for passage in relevant_passages:
             # Extract citation
@@ -260,11 +261,22 @@ async def answer_rts_general(question: str) -> str:
                 seen_citations.add(citation)
                 citations.append(citation)
             
-            # Add to context
+            # Add to context with text truncation
             text = passage.get("text") or ""
+            # Truncate text to prevent very long contexts
+            max_text_length = 500
+            if len(text) > max_text_length:
+                text = text[:max_text_length] + "..."
             context_lines.append(f"{doc_name} p.{page_str}: {text}")
         
         context = "\n\n".join(context_lines)
+        
+        # Additional context length check
+        max_context_length = 2000  # Limit total context length
+        print(f"DEBUG: Context length: {len(context)} characters")
+        if len(context) > max_context_length:
+            print(f"DEBUG: Context too long ({len(context)} chars), truncating to {max_context_length}")
+            context = context[:max_context_length] + "..."
         
         # Generate answer using LLM
         system_prompt = (
@@ -300,14 +312,31 @@ async def answer_rts_general(question: str) -> str:
             ],
         }
         
-        async with httpx.AsyncClient() as client:
-            llm_response = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
-                json=llm_payload,
-                timeout=60,
-            )
-            llm_response.raise_for_status()
-            llm_data = llm_response.json()
+        # Try LLM call with timeout and retry
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:  # Reduced timeout
+                    llm_response = await client.post(
+                        f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                        json=llm_payload,
+                    )
+                    llm_response.raise_for_status()
+                    llm_data = llm_response.json()
+                    break  # Success, exit retry loop
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                print(f"DEBUG: LLM timeout attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt == max_retries - 1:
+                    # Last attempt failed, use fallback
+                    print("DEBUG: All LLM attempts failed, using fallback")
+                    return await _fallback_llm_response(question, "RTS")
+                # Wait before retry
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"DEBUG: LLM error attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt == max_retries - 1:
+                    return await _fallback_llm_response(question, "RTS")
+                await asyncio.sleep(1)
         
         answer = llm_data["choices"][0]["message"]["content"]
         
