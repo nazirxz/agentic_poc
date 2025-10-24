@@ -43,53 +43,49 @@ async def run_rag(question: str, collection: str | None = None) -> dict:
 
 @tool
 async def answer_stk_auto(question: str) -> str:
-    """Gunakan pemilihan otomatis (pedoman, TKO, TKI, TKPA) untuk menjawab."""
+    """Pilihan otomatis - sistem akan memilih koleksi (pedoman/TKO/TKI/TKPA) yang paling sesuai.
+    Gunakan ini jika tidak yakin kategori dokumen yang tepat.
+    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question)).decode()
 
 
 @tool
 async def answer_stk_pedoman(question: str) -> str:
-    """Gunakan koleksi pedoman/manual untuk pertanyaan kebijakan umum."""
+    """Cari di koleksi PEDOMAN/MANUAL untuk pertanyaan tentang kebijakan umum atau panduan.
+    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question, collection="pedoman")).decode()
 
 
 @tool
 async def answer_stk_tko(question: str) -> str:
-    """Gunakan koleksi TKO (tata kerja organisasi, prosedur kerja)."""
+    """Cari di koleksi TKO (Tata Kerja Organisasi) untuk prosedur kerja dan tata kerja organisasi.
+    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question, collection="TKO")).decode()
 
 
 @tool
 async def answer_stk_tki(question: str) -> str:
-    """Gunakan koleksi TKI (tata kerja individu)."""
+    """Cari di koleksi TKI (Tata Kerja Individu) untuk tata kerja individu.
+    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question, collection="TKI")).decode()
 
 
 @tool
 async def answer_stk_tkpa(question: str) -> str:
-    """Gunakan koleksi TKPA (instruksi penggunaan alat)."""
+    """Cari di koleksi TKPA (Tata Kerja Penggunaan Alat) untuk instruksi penggunaan alat/peralatan.
+    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question, collection="TKPA")).decode()
 
 
-system_prompt = (
-    "Anda Agent STK. Pilih dan panggil SATU tool yang paling sesuai, HANYA SEKALI.\n\n"
-    "PILIHAN TOOL:\n"
-    "1. answer_stk_pedoman - untuk panduan/kebijakan umum\n"
-    "2. answer_stk_tko - untuk prosedur kerja organisasi\n"
-    "3. answer_stk_tki - untuk tata kerja individu\n"
-    "4. answer_stk_tkpa - untuk instruksi penggunaan alat\n"
-    "5. answer_stk_auto - jika tidak yakin (pilihan default)\n\n"
-    "ATURAN:\n"
-    "- Pilih SATU tool yang paling sesuai\n"
-    "- Panggil tool HANYA SEKALI\n"
-    "- Setelah dapat hasil, LANGSUNG return sebagai final answer\n"
-    "- Output adalah JSON murni dari tool"
-)
-
+# ReAct agent untuk STK dengan tool descriptions yang jelas
 agent_executor = create_react_agent(
     llm,
     [answer_stk_auto, answer_stk_pedoman, answer_stk_tko, answer_stk_tki, answer_stk_tkpa],
-    state_modifier=system_prompt,
 )
 
 app = FastAPI()

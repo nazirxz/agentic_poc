@@ -38,23 +38,16 @@ async def run_rag(question: str) -> dict:
 
 @tool
 async def answer_rts_general(question: str) -> str:
-    """Gunakan untuk pertanyaan standar teknis RTS secara umum."""
+    """Cari jawaban dari database dokumen RTS untuk pertanyaan tentang standar teknis.
+    Return JSON: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """
     return orjson.dumps(await run_rag(question)).decode()
 
 
-system_prompt = (
-    "Anda Agent RTS. Panggil tool 'answer_rts_general' SATU KALI untuk mendapatkan jawaban.\n\n"
-    "ATURAN:\n"
-    "- Panggil tool answer_rts_general HANYA SEKALI\n"
-    "- Setelah dapat hasil dari tool, LANGSUNG return sebagai final answer\n"
-    "- JANGAN panggil tool lagi setelah mendapat hasil\n"
-    "- Output adalah JSON murni dari tool"
-)
-
+# ReAct agent untuk RTS dengan tool description yang jelas
 agent_executor = create_react_agent(
     llm,
     [answer_rts_general],
-    state_modifier=system_prompt,
 )
 
 app = FastAPI()

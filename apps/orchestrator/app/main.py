@@ -52,23 +52,35 @@ async def _call_agent(url: str, domain: str, question: str) -> Dict[str, Any]:
 
 
 @tool
+async def call_general_agent(question: str) -> str:
+    """Panggil agent general untuk sapaan, obrolan umum, atau pertanyaan tentang kemampuan sistem.
+    Gunakan untuk: 'halo', 'hello', 'apa kabar', 'siapa kamu', 'apa yang bisa kamu lakukan'.
+    Agent ini TIDAK mencari di dokumen, hanya conversational AI.
+    Return format JSON: {"domain": "GENERAL", "answer": "...", "citations": [], "diagnostic": {...}}
+    """
+    result = await _call_agent(settings.AGENT_GENERAL_URL, "GENERAL", question)
+    return orjson.dumps(result).decode()
+
+
+@tool
 async def call_stk_agent(question: str) -> str:
-    """Gunakan ketika pertanyaan menyangkut domain STK (TKO/TKI/TKPA/pedoman)."""
+    """Panggil agent STK untuk pertanyaan tentang dokumen kategori STK.
+    Gunakan untuk: TKO, TKI, TKPA, pedoman, prosedur kerja, tata kerja organisasi/individu, instruksi alat.
+    Agent ini mencari di database dokumen STK dengan RAG.
+    Return format JSON: {"domain": "STK", "answer": "...", "citations": ["doc.pdf p.5"], "diagnostic": {...}}
+    """
     result = await _call_agent(settings.AGENT_STK_URL, "STK", question)
     return orjson.dumps(result).decode()
 
 
 @tool
 async def call_rts_agent(question: str) -> str:
-    """Gunakan ketika pertanyaan menyangkut domain RTS atau standar teknis."""
+    """Panggil agent RTS untuk pertanyaan tentang dokumen standar teknis RTS.
+    Gunakan untuk: standar teknis, regulasi teknis, spesifikasi RTS.
+    Agent ini mencari di database dokumen RTS dengan RAG.
+    Return format JSON: {"domain": "RTS", "answer": "...", "citations": ["doc.pdf p.5"], "diagnostic": {...}}
+    """
     result = await _call_agent(settings.AGENT_RTS_URL, "RTS", question)
-    return orjson.dumps(result).decode()
-
-
-@tool
-async def call_general_agent(question: str) -> str:
-    """Gunakan untuk pertanyaan umum, sapaan, atau obrolan yang tidak memerlukan pencarian dokumen."""
-    result = await _call_agent(settings.AGENT_GENERAL_URL, "GENERAL", question)
     return orjson.dumps(result).decode()
 
 
@@ -78,24 +90,12 @@ llm = ChatOllama(
     temperature=0.2,
 )
 
-system_prompt = (
-    "Anda adalah Orchestrator URBUDDY. Tugas Anda memilih dan memanggil tool agent yang tepat SATU KALI SAJA.\n\n"
-    "ATURAN ROUTING:\n"
-    "1. Untuk sapaan, obrolan umum, pertanyaan tentang kemampuan sistem → call_general_agent\n"
-    "2. Untuk pertanyaan kategori STK (TKO, TKI, TKPA, pedoman, prosedur kerja) → call_stk_agent\n"
-    "3. Untuk pertanyaan standar teknis RTS → call_rts_agent\n\n"
-    "ATURAN PENTING:\n"
-    "- Pilih SATU tool yang paling sesuai\n"
-    "- Panggil tool HANYA SEKALI\n"
-    "- Setelah dapat hasil dari tool, LANGSUNG return hasilnya sebagai final answer\n"
-    "- JANGAN panggil tool kedua kali\n"
-    "- Output akhir adalah JSON murni dari tool"
-)
-
+# System prompt untuk ReAct agent
+# Note: create_react_agent sudah punya prompt default yang baik
+# Kita hanya perlu pastikan tool descriptions jelas
 agent_executor = create_react_agent(
     llm,
     [call_general_agent, call_stk_agent, call_rts_agent],
-    state_modifier=system_prompt,
 )
 
 
