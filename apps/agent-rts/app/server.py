@@ -131,18 +131,29 @@ async def answer_rts_general(question: str) -> str:
         
         print(f"DEBUG: Vector search returned {len(vector_results[0]) if vector_results else 0} hits")
         
-        # 2. Keyword search for specific terms
+        # 2. Keyword search for specific terms with stricter filtering
         keyword_results = []
         if "bil" in question.lower():
             try:
-                # Search using keyword field
+                # More specific keyword search - exclude approval/update documents
                 keyword_results = client.query(
                     collection_name=settings.MILVUS_COLLECTION_NAME,
-                    filter='keyword like "%bil%" or text like "%bil%" or summary like "%bil%"',
+                    filter='(text like "%bil%" or keyword like "%bil%" or summary like "%bil%") and text not like "%persetujuan%" and text not like "%pengkinian%" and text not like "%approval%"',
                     output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
                     limit=10
                 )
-                print(f"DEBUG: Keyword search for 'bil' returned {len(keyword_results)} hits")
+                print(f"DEBUG: Keyword search for 'bil' (filtered) returned {len(keyword_results)} hits")
+                
+                # Additional search for technical specifications
+                tech_results = client.query(
+                    collection_name=settings.MILVUS_COLLECTION_NAME,
+                    filter='(text like "%specification%" or text like "%standard%" or text like "%requirement%") and (text like "%bil%" or text like "%insulation%" or text like "%voltage%")',
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                    limit=5
+                )
+                print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
+                keyword_results.extend(tech_results)
+                
             except Exception as e:
                 print(f"DEBUG: Keyword search failed: {e}")
         
@@ -249,6 +260,23 @@ async def answer_rts_general(question: str) -> str:
         # Use top passages after reranking, but limit context length to prevent timeout
         relevant_passages = passages[:min(settings.MAX_CONTEXT, 4)]  # Reduce to 4 passages max
         print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking (limited to prevent timeout)")
+        
+        # Additional quality check - only use passages with meaningful technical content
+        quality_passages = []
+        for passage in relevant_passages:
+            text = passage.get("text", "").lower()
+            # Skip passages that are mostly administrative/approval content
+            if any(term in text for term in ["persetujuan", "pengkinian", "approval", "<!-- image -->", "date", "subject"]):
+                print(f"DEBUG: Skipping administrative passage: {passage['text'][:50]}...")
+                continue
+            # Skip very short or mostly HTML content
+            if len(text) < 100 or text.count("<") > 3:
+                print(f"DEBUG: Skipping low-quality passage: {passage['text'][:50]}...")
+                continue
+            quality_passages.append(passage)
+        
+        relevant_passages = quality_passages[:3]  # Use max 3 high-quality passages
+        print(f"DEBUG: Using {len(relevant_passages)} high-quality passages after filtering")
         
         for passage in relevant_passages:
             # Extract citation
@@ -434,13 +462,25 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         keyword = passage.get("keyword", "").lower()
         summary = passage.get("summary", "").lower()
         
+        # Heavy penalty for non-technical documents
+        non_technical_terms = ["persetujuan", "pengkinian", "approval", "update", "<!-- image -->", "date", "subject"]
+        for term in non_technical_terms:
+            if term in text:
+                score -= 1.0  # Heavy penalty
+        
         # Boost score for keyword matches
         if passage.get("source") == "keyword":
             score += 0.5
         
         # Boost score for exact keyword matches
         if "bil" in question_lower and "bil" in text:
-            score += 0.3
+            score += 0.5  # Increased boost
+        
+        # Boost score for technical terms
+        technical_terms = ["specification", "requirement", "standard", "voltage", "insulation", "electrical", "technical"]
+        for term in technical_terms:
+            if term in text:
+                score += 0.2
         
         # Boost score for RTS-related terms
         rts_terms = ["rts", "rokan", "technical", "standard", "specification"]
@@ -450,15 +490,19 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         
         # Boost score for keyword field matches
         if keyword and any(word in keyword for word in question_words):
-            score += 0.2
+            score += 0.3  # Increased boost
         
         # Boost score for summary matches
         if summary and any(word in summary for word in question_words):
-            score += 0.15
+            score += 0.2
         
         # Penalize very short passages
         if len(text) < 50:
-            score -= 0.1
+            score -= 0.5  # Increased penalty
+        
+        # Penalize passages that are mostly HTML/formatting
+        if text.count("<") > 5 or text.count("&") > 3:
+            score -= 0.8
         
         return score
     
@@ -469,11 +513,16 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
     # Sort by relevance score (higher is better)
     passages.sort(key=lambda x: x["relevance_score"], reverse=True)
     
+    # Filter out passages with very low relevance scores
+    min_relevance_score = 0.0  # Only keep passages with positive scores
+    filtered_passages = [p for p in passages if p["relevance_score"] > min_relevance_score]
+    
+    print(f"DEBUG: Passages after filtering: {len(filtered_passages)}/{len(passages)} (min score: {min_relevance_score})")
     print(f"DEBUG: Top 3 passages after reranking:")
-    for i, passage in enumerate(passages[:3]):
+    for i, passage in enumerate(filtered_passages[:3]):
         print(f"  {i+1}. Score: {passage['relevance_score']:.3f}, Source: {passage['source']}, Text: {passage['text'][:100]}...")
     
-    return passages
+    return filtered_passages
 
 
 async def _generate_embedding(text: str) -> List[float]:
