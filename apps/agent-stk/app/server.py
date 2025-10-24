@@ -112,7 +112,7 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
             collection_name=collection_name,
             data=[embedding],
             anns_field="vector",
-            param=search_params,
+            search_params=search_params,
             limit=settings.TOP_K,
             output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
             expr=filter_expr

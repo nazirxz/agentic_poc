@@ -86,7 +86,7 @@ async def answer_rts_general(question: str) -> str:
             collection_name=settings.MILVUS_COLLECTION_NAME,
             data=[embedding],
             anns_field="vector",
-            param=search_params,
+            search_params=search_params,
             limit=settings.TOP_K,
             output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
             expr=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
