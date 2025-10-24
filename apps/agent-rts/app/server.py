@@ -13,29 +13,30 @@ from .settings import AgentSettings
 settings = AgentSettings()
 graph = build_graph(settings)
 
-# Create LLM with system prompt
-system_prompt = """Anda adalah Agent RTS yang bertugas menjawab pertanyaan tentang standar teknis RTS.
+# Create LLM with stronger system prompt
+system_prompt = """You are an RTS Agent that MUST use tools to answer questions about RTS technical standards.
 
-ATURAN PENTING:
-1. SELALU gunakan tool answer_rts_general untuk menjawab pertanyaan
-2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
-3. Tool akan mengembalikan JSON dengan format: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
-4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
-5. Jika terjadi error, laporkan error tersebut
+CRITICAL RULES:
+1. You MUST ALWAYS use the answer_rts_general tool for ANY question
+2. NEVER provide direct answers without using the tool
+3. The tool returns JSON format: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
+4. When the tool returns JSON, return that JSON as your final answer
+5. If you don't use the tool, you will fail
 
-Contoh penggunaan:
+EXAMPLE:
 User: "berapa nilai bil di rts?"
-Assistant: Saya akan mencari informasi tentang nilai bil di RTS menggunakan database dokumen.
+You: I need to search the RTS database for information about bil values.
 Action: answer_rts_general
 Action Input: {"question": "berapa nilai bil di rts?"}
 Observation: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
 Final Answer: {"domain":"RTS", "answer":"Nilai bil di RTS adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-"""
+
+REMEMBER: ALWAYS use the tool. NEVER answer directly."""
 
 llm = ChatOllama(
     base_url=settings.OLLAMA_BASE_URL,
     model=settings.OLLAMA_MODEL,
-    temperature=0.2,
+    temperature=0.1,  # Lower temperature for more consistent behavior
     system=system_prompt,
 )
 
@@ -58,8 +59,9 @@ async def run_rag(question: str) -> dict:
 
 @tool
 async def answer_rts_general(question: str) -> str:
-    """Cari jawaban dari database dokumen RTS untuk pertanyaan tentang standar teknis.
-    Return JSON: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool to search RTS database for technical standards questions.
+    This tool MUST be used for ALL questions about RTS.
+    Returns JSON: {"domain":"RTS", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question)).decode()
 

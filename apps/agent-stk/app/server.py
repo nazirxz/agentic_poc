@@ -13,36 +13,37 @@ from .settings import AgentSettings
 settings = AgentSettings()
 graph = build_graph(settings)
 
-# Create LLM with system prompt
-system_prompt = """Anda adalah Agent STK yang bertugas menjawab pertanyaan tentang dokumen STK (Sistem Tata Kerja).
+# Create LLM with stronger system prompt
+system_prompt = """You are an STK Agent that MUST use tools to answer questions about STK documents.
 
-ATURAN PENTING:
-1. SELALU gunakan salah satu tool yang tersedia untuk menjawab pertanyaan
-2. JANGAN memberikan jawaban langsung tanpa menggunakan tool
-3. Tool akan mengembalikan JSON dengan format: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
-4. Jika tool mengembalikan JSON, kembalikan JSON tersebut sebagai jawaban final
-5. Jika terjadi error, laporkan error tersebut
+CRITICAL RULES:
+1. You MUST ALWAYS use one of the available tools for ANY question
+2. NEVER provide direct answers without using a tool
+3. Tools return JSON format: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+4. When a tool returns JSON, return that JSON as your final answer
+5. If you don't use a tool, you will fail
 
-PILIHAN TOOL:
-- answer_stk_auto: Untuk pertanyaan umum atau jika tidak yakin kategori dokumen
-- answer_stk_pedoman: Untuk kebijakan umum atau panduan
-- answer_stk_tko: Untuk prosedur kerja dan tata kerja organisasi
-- answer_stk_tki: Untuk tata kerja individu
-- answer_stk_tkpa: Untuk instruksi penggunaan alat/peralatan
+AVAILABLE TOOLS:
+- answer_stk_auto: For general questions or when unsure about document category
+- answer_stk_pedoman: For general policies or guidelines
+- answer_stk_tko: For organizational work procedures
+- answer_stk_tki: For individual work procedures
+- answer_stk_tkpa: For equipment usage instructions
 
-Contoh penggunaan:
+EXAMPLE:
 User: "bagaimana prosedur kerja organisasi?"
-Assistant: Saya akan mencari informasi tentang prosedur kerja organisasi di dokumen STK.
+You: I need to search STK documents for organizational work procedures.
 Action: answer_stk_tko
 Action Input: {"question": "bagaimana prosedur kerja organisasi?"}
 Observation: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
 Final Answer: {"domain":"STK", "answer":"Prosedur kerja organisasi adalah...", "citations":["doc.pdf p.5"], "diagnostic":{...}}
-"""
+
+REMEMBER: ALWAYS use a tool. NEVER answer directly."""
 
 llm = ChatOllama(
     base_url=settings.OLLAMA_BASE_URL,
     model=settings.OLLAMA_MODEL,
-    temperature=0.2,
+    temperature=0.1,  # Lower temperature for more consistent behavior
     system=system_prompt,
 )
 
@@ -70,41 +71,41 @@ async def run_rag(question: str, collection: str | None = None) -> dict:
 
 @tool
 async def answer_stk_auto(question: str) -> str:
-    """Pilihan otomatis - sistem akan memilih koleksi (pedoman/TKO/TKI/TKPA) yang paling sesuai.
-    Gunakan ini jika tidak yakin kategori dokumen yang tepat.
-    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool for automatic collection selection - system will choose the most suitable collection (pedoman/TKO/TKI/TKPA).
+    Use this if unsure about document category.
+    Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question)).decode()
 
 
 @tool
 async def answer_stk_pedoman(question: str) -> str:
-    """Cari di koleksi PEDOMAN/MANUAL untuk pertanyaan tentang kebijakan umum atau panduan.
-    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool to search PEDOMAN/MANUAL collection for general policy or guideline questions.
+    Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question, collection="pedoman")).decode()
 
 
 @tool
 async def answer_stk_tko(question: str) -> str:
-    """Cari di koleksi TKO (Tata Kerja Organisasi) untuk prosedur kerja dan tata kerja organisasi.
-    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool to search TKO (Tata Kerja Organisasi) collection for organizational work procedures.
+    Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question, collection="TKO")).decode()
 
 
 @tool
 async def answer_stk_tki(question: str) -> str:
-    """Cari di koleksi TKI (Tata Kerja Individu) untuk tata kerja individu.
-    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool to search TKI (Tata Kerja Individu) collection for individual work procedures.
+    Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question, collection="TKI")).decode()
 
 
 @tool
 async def answer_stk_tkpa(question: str) -> str:
-    """Cari di koleksi TKPA (Tata Kerja Penggunaan Alat) untuk instruksi penggunaan alat/peralatan.
-    Return JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
+    """MANDATORY tool to search TKPA (Tata Kerja Penggunaan Alat) collection for equipment usage instructions.
+    Returns JSON: {"domain":"STK", "answer":"...", "citations":[...], "diagnostic":{...}}
     """
     return orjson.dumps(await run_rag(question, collection="TKPA")).decode()
 
