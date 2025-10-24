@@ -85,8 +85,18 @@ async def answer_rts_general(question: str) -> str:
         except Exception as e:
             print(f"DEBUG: Could not get collection info: {e}")
         
-        # Generate embedding for the question using Ollama
-        embedding = await _generate_embedding(question)
+        # Preprocess and expand query for better retrieval
+        expanded_queries = await _expand_query(question)
+        print(f"DEBUG: Expanded queries: {expanded_queries}")
+        
+        # Generate embeddings for all query variations
+        embeddings = []
+        for query in expanded_queries:
+            embedding = await _generate_embedding(query)
+            embeddings.append(embedding)
+        
+        # Use the first (original) embedding for primary search
+        embedding = embeddings[0]
         
         # Search Milvus collection
         search_params = {
@@ -105,17 +115,38 @@ async def answer_rts_general(question: str) -> str:
         print(f"DEBUG: Search limit: {settings.TOP_K}")
         print(f"DEBUG: Available categories: {available_categories}")
         
-        # Start with no filter to get maximum results
-        results = client.search(
+        # Hybrid search: Combine vector search with keyword search
+        all_passages = []
+        
+        # 1. Vector search
+        vector_results = client.search(
             collection_name=settings.MILVUS_COLLECTION_NAME,
             data=[embedding],
             anns_field="vector",
             search_params=search_params,
             limit=settings.TOP_K,
-            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"]
+            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
         )
         
-        print(f"DEBUG: Search without filter returned {len(results[0]) if results else 0} hits")
+        print(f"DEBUG: Vector search returned {len(vector_results[0]) if vector_results else 0} hits")
+        
+        # 2. Keyword search for specific terms
+        keyword_results = []
+        if "bil" in question.lower():
+            try:
+                # Search using keyword field
+                keyword_results = client.query(
+                    collection_name=settings.MILVUS_COLLECTION_NAME,
+                    filter='keyword like "%bil%" or text like "%bil%" or summary like "%bil%"',
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                    limit=10
+                )
+                print(f"DEBUG: Keyword search for 'bil' returned {len(keyword_results)} hits")
+            except Exception as e:
+                print(f"DEBUG: Keyword search failed: {e}")
+        
+        # Combine results
+        results = vector_results
         
         # If we have results, check if we need category filtering
         if results and results[0]:
@@ -145,18 +176,49 @@ async def answer_rts_general(question: str) -> str:
             else:
                 print("DEBUG: Using all results without category filtering")
         
-        # Process results
+        # Process and combine results
         passages = []
-        for hits in results:
-            for hit in hits:
+        seen_ids = set()
+        
+        # Process vector search results
+        if results and results[0]:
+            for hit in results[0]:
+                hit_id = hit.get("id")
+                if hit_id not in seen_ids:
+                    passages.append({
+                        "id": hit_id,
+                        "text": hit.get("text"),
+                        "document_id": hit.get("document_id"),
+                        "document_name": hit.get("document_name"),
+                        "number_page": hit.get("number_page"),
+                        "score": hit.get("distance", 0),
+                        "source": "vector",
+                        "keyword": hit.get("keyword", ""),
+                        "summary": hit.get("summary", "")
+                    })
+                    seen_ids.add(hit_id)
+        
+        # Process keyword search results
+        for hit in keyword_results:
+            hit_id = hit.get("id")
+            if hit_id not in seen_ids:
                 passages.append({
-                    "id": hit.get("id"),
+                    "id": hit_id,
                     "text": hit.get("text"),
                     "document_id": hit.get("document_id"),
                     "document_name": hit.get("document_name"),
                     "number_page": hit.get("number_page"),
-                    "score": hit.get("distance", 0)
+                    "score": 0.1,  # Lower score for keyword matches
+                    "source": "keyword",
+                    "keyword": hit.get("keyword", ""),
+                    "summary": hit.get("summary", "")
                 })
+                seen_ids.add(hit_id)
+        
+        print(f"DEBUG: Combined results: {len(passages)} passages ({len([p for p in passages if p['source'] == 'vector'])} vector, {len([p for p in passages if p['source'] == 'keyword'])} keyword)")
+        
+        # Rerank passages based on relevance
+        passages = await _rerank_passages(passages, question)
         
         if not passages:
             return orjson.dumps({
@@ -164,13 +226,17 @@ async def answer_rts_general(question: str) -> str:
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                    "mode": "pymilvus_search",
-                    "hits": 0,
+                    "mode": "hybrid_search_with_reranking",
+                    "vector_hits": 0,
+                    "keyword_hits": 0,
+                    "total_hits": 0,
                     "collection": settings.MILVUS_COLLECTION_NAME,
-                    "search_strategy": "no_filter_primary",
+                    "search_strategy": "hybrid_no_filter",
                     "available_categories": available_categories,
                     "embedding_dimension": len(embedding),
-                    "search_limit": settings.TOP_K
+                    "search_limit": settings.TOP_K,
+                    "query_expansion": len(expanded_queries) > 1,
+                    "reranking_applied": True
                 }
             }).decode()
         
@@ -179,14 +245,9 @@ async def answer_rts_general(question: str) -> str:
         citations = []
         seen_citations = set()
         
-        # Filter passages for specific keywords if question is about specific terms
+        # Use top passages after reranking
         relevant_passages = passages[:settings.MAX_CONTEXT]
-        if "bil" in question.lower():
-            # Prioritize passages containing "bil" or related terms
-            bil_passages = [p for p in passages if "bil" in p.get("text", "").lower()]
-            if bil_passages:
-                relevant_passages = bil_passages[:settings.MAX_CONTEXT]
-                print(f"DEBUG: Found {len(bil_passages)} passages containing 'bil'")
+        print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking")
         
         for passage in relevant_passages:
             # Extract citation
@@ -255,10 +316,14 @@ async def answer_rts_general(question: str) -> str:
             "answer": answer,
             "citations": citations,
             "diagnostic": {
-                "mode": "pymilvus_search",
-                "hits": len(passages),
+                "mode": "hybrid_search_with_reranking",
+                "vector_hits": len([p for p in passages if p.get("source") == "vector"]),
+                "keyword_hits": len([p for p in passages if p.get("source") == "keyword"]),
+                "total_hits": len(passages),
                 "used_passages": len(context_lines),
-                "collection": settings.MILVUS_COLLECTION_NAME
+                "collection": settings.MILVUS_COLLECTION_NAME,
+                "query_expansion": len(expanded_queries) > 1,
+                "reranking_applied": True
             }
         }).decode()
         
@@ -267,6 +332,119 @@ async def answer_rts_general(question: str) -> str:
         error_detail = f"Pymilvus search error: {str(e)}\n{traceback.format_exc()}"
         print(error_detail)
         return await _fallback_llm_response(question, "RTS")
+
+
+async def _expand_query(question: str) -> List[str]:
+    """Expand query with synonyms and related terms for better retrieval"""
+    expanded = [question]  # Always include original question
+    
+    # Define query expansion rules for RTS domain
+    expansion_rules = {
+        "nilai bil": [
+            "bil value",
+            "bil parameter", 
+            "bil specification",
+            "bil standard",
+            "bil requirement",
+            "bil criteria",
+            "bil measurement",
+            "bil threshold"
+        ],
+        "rokan technical standard": [
+            "RTS",
+            "rokan standard",
+            "technical standard",
+            "engineering standard",
+            "rokan specification",
+            "rokan requirement"
+        ],
+        "berapa": [
+            "what is",
+            "what are",
+            "how much",
+            "how many",
+            "what value",
+            "what parameter"
+        ]
+    }
+    
+    # Apply expansion rules
+    question_lower = question.lower()
+    for key, expansions in expansion_rules.items():
+        if key in question_lower:
+            for expansion in expansions:
+                expanded_query = question_lower.replace(key, expansion)
+                if expanded_query not in expanded:
+                    expanded.append(expanded_query)
+    
+    # Add technical variations
+    if "bil" in question_lower:
+        technical_variations = [
+            question_lower.replace("bil", "BIL"),
+            question_lower.replace("bil", "Basic Insulation Level"),
+            question_lower.replace("bil", "insulation level"),
+            question_lower.replace("bil", "voltage level")
+        ]
+        expanded.extend(technical_variations)
+    
+    # Limit to reasonable number of queries
+    return expanded[:5]
+
+
+async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
+    """Rerank passages based on relevance to the question"""
+    if not passages:
+        return passages
+    
+    question_lower = question.lower()
+    question_words = set(question_lower.split())
+    
+    def calculate_relevance_score(passage):
+        score = passage.get("score", 0)
+        text = passage.get("text", "").lower()
+        keyword = passage.get("keyword", "").lower()
+        summary = passage.get("summary", "").lower()
+        
+        # Boost score for keyword matches
+        if passage.get("source") == "keyword":
+            score += 0.5
+        
+        # Boost score for exact keyword matches
+        if "bil" in question_lower and "bil" in text:
+            score += 0.3
+        
+        # Boost score for RTS-related terms
+        rts_terms = ["rts", "rokan", "technical", "standard", "specification"]
+        for term in rts_terms:
+            if term in text:
+                score += 0.1
+        
+        # Boost score for keyword field matches
+        if keyword and any(word in keyword for word in question_words):
+            score += 0.2
+        
+        # Boost score for summary matches
+        if summary and any(word in summary for word in question_words):
+            score += 0.15
+        
+        # Penalize very short passages
+        if len(text) < 50:
+            score -= 0.1
+        
+        return score
+    
+    # Calculate relevance scores
+    for passage in passages:
+        passage["relevance_score"] = calculate_relevance_score(passage)
+    
+    # Sort by relevance score (higher is better)
+    passages.sort(key=lambda x: x["relevance_score"], reverse=True)
+    
+    print(f"DEBUG: Top 3 passages after reranking:")
+    for i, passage in enumerate(passages[:3]):
+        print(f"  {i+1}. Score: {passage['relevance_score']:.3f}, Source: {passage['source']}, Text: {passage['text'][:100]}...")
+    
+    return passages
 
 
 async def _generate_embedding(text: str) -> List[float]:
