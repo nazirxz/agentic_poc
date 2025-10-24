@@ -115,7 +115,7 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
             search_params=search_params,
             limit=settings.TOP_K,
             output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-            expr=filter_expr
+            filter=filter_expr
         )
         
         # Process results

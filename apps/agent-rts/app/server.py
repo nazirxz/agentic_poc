@@ -89,7 +89,7 @@ async def answer_rts_general(question: str) -> str:
             search_params=search_params,
             limit=settings.TOP_K,
             output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-            expr=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
+            filter=f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
         )
         
         # Process results
