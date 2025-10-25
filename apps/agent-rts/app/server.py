@@ -166,7 +166,7 @@ async def answer_rts_general(question: str) -> str:
                         reqs=[dense_req, sparse_req],
                         ranker=RRFRanker(k=60),  # RRF with k=60 (optimal)
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
                     )
                     print(f"DEBUG: Hybrid search (dense + sparse) completed, retrieved {len(results[0]) if results else 0} candidates")
                 else:
@@ -177,7 +177,7 @@ async def answer_rts_general(question: str) -> str:
             anns_field="vector",
             search_params=search_params,
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
                     )
             except Exception as e:
                 print(f"DEBUG: Error in sparse search: {e}, falling back to dense-only")
@@ -187,7 +187,7 @@ async def answer_rts_general(question: str) -> str:
                     anns_field="vector",
                     search_params=search_params,
                     limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
                 )
         else:
             # Fallback to dense-only search
@@ -198,8 +198,8 @@ async def answer_rts_general(question: str) -> str:
                 anns_field="vector",
                 search_params=search_params,
                 limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
-        )
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
+            )
         
         print(f"DEBUG: Hybrid search returned {len(results[0]) if results else 0} hits")
         
@@ -222,7 +222,7 @@ async def answer_rts_general(question: str) -> str:
                     keyword_results = client.query(
                         collection_name=settings.MILVUS_COLLECTION_NAME,
                         filter=filter_expression,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"],
                         limit=10
                     )
                     print(f"DEBUG: Dynamic keyword search returned {len(keyword_results)} hits")
@@ -235,7 +235,7 @@ async def answer_rts_general(question: str) -> str:
                         tech_results = client.query(
                             collection_name=settings.MILVUS_COLLECTION_NAME,
                             filter='text like "%specification%" or text like "%standard%"',
-                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
+                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"],
                             limit=5
                         )
                         print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
@@ -288,7 +288,7 @@ async def answer_rts_general(question: str) -> str:
                                 reqs=[dense_req_filter, sparse_req_filter],
                                 ranker=RRFRanker(k=60),
                                 limit=settings.TOP_K,
-                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
                                 filter=f'category == "{settings.CATEGORY_FILTER}"'
                             )
                         except Exception as e:
@@ -300,7 +300,7 @@ async def answer_rts_general(question: str) -> str:
                                 anns_field="vector",
                                 search_params=search_params,
                                 limit=settings.TOP_K,
-                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
                                 filter=f'category == "{settings.CATEGORY_FILTER}"'
                             )
                     else:
@@ -311,7 +311,7 @@ async def answer_rts_general(question: str) -> str:
                         anns_field="vector",
                         search_params=search_params,
                         limit=settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
                         filter=f'category == "{settings.CATEGORY_FILTER}"'
                     )
                     print(f"DEBUG: Search with category filter returned {len(results[0]) if results else 0} hits")
@@ -338,7 +338,8 @@ async def answer_rts_general(question: str) -> str:
                         "score": hit.get("distance", 0),
                         "source": "hybrid",
                         "keyword": hit.get("keyword", ""),
-                        "summary": hit.get("summary", "")
+                        "summary": hit.get("summary", ""),
+                        "context": hit.get("context", "")
                     })
                     seen_ids.add(hit_id)
         
@@ -360,7 +361,8 @@ async def answer_rts_general(question: str) -> str:
                         "score": 0.1,  # Lower score for keyword matches
                         "source": "keyword",
                         "keyword": hit.get("keyword", ""),
-                        "summary": hit.get("summary", "")
+                        "summary": hit.get("summary", ""),
+                        "context": hit.get("context", "")
                     })
                     seen_ids.add(hit_id)
         except Exception as e:
@@ -644,31 +646,61 @@ def _get_stopwords() -> set:
 
 async def _expand_query(question: str) -> List[str]:
     """
-    Query expansion using embedding-based diversity (production-ready)
-    
-    In production, this could use:
-    - Synonym dictionary from database
-    - Query logs analysis
-    - Embedding-based query rewriting
-    
-    For now, we use the original query with minimal expansion
-    to avoid noise and over-generalization
+    Query expansion using an on-premise LLM to generate variations.
     """
     # Start with original query
-    expanded = [question]
-    
-    # Extract keywords for potential variations
-    keywords = _extract_keywords_from_question(question)
-    
-    # For production: could add query variations based on:
-    # 1. Common query patterns from logs
-    # 2. Synonym database
-    # 3. Domain-specific terminology mapping
-    
-    # For now, keep it simple: just use the original query
-    # Multiple dense queries with different ef parameters handle diversity
-    
-    return expanded[:1]  # Return only original query
+    expanded = {question}  # Use a set to handle duplicates
+
+    try:
+        import httpx
+
+        prompt = (
+            "You are an expert query expander. Your task is to reformulate the user's question to improve search retrieval. "
+            "Generate 2 alternative phrasings for the following question. "
+            'Return a JSON list of strings, like ["variation 1", "variation 2"].\n\n'
+            f'Question: "{question}"\n\n'
+            "JSON list of variations:"
+        )
+
+        llm_payload = {
+            "model": settings.OLLAMA_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant that provides JSON output."},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"}
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:  # Shorter timeout for this
+            llm_response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                json=llm_payload,
+            )
+            llm_response.raise_for_status()
+            llm_data = llm_response.json()
+
+        # Extract variations from the response
+        variations_str = llm_data["choices"][0]["message"]["content"]
+        # The response is a JSON string, so we need to parse it.
+        # It might be inside a larger JSON object from the LLM.
+        try:
+            # The model might return a markdown JSON block, so we clean it.
+            import re
+            json_str_match = re.search(r'\[.*\]', variations_str, re.DOTALL)
+            if json_str_match:
+                variations = orjson.loads(json_str_match.group(0))
+                if isinstance(variations, list):
+                    expanded.update(variations)
+        except (orjson.JSONDecodeError, TypeError) as e:
+            print(f"DEBUG: Failed to parse query expansion variations: {e}. Content: {variations_str}")
+
+    except Exception as e:
+        print(f"DEBUG: Query expansion LLM call failed: {e}")
+
+    final_queries = list(expanded)
+    print(f"DEBUG: Expanded queries: {final_queries}")
+    return final_queries[:settings.MAX_EXPANDED_QUERIES]  # Limit number of queries
 
 
 async def _apply_cross_encoder_reranking(passages: List[dict], question: str) -> List[dict]:
@@ -694,7 +726,10 @@ async def _apply_cross_encoder_reranking(passages: List[dict], question: str) ->
         )
         
         # Prepare query-passage pairs for reranking
-        pairs = [[question, passage.get("text", "")] for passage in passages]
+        pairs = [
+            [question, f'{p.get("text", "")}\n\n{p.get("context", "")}'] 
+            for p in passages if p.get("text")
+        ]
         
         # Get reranking scores
         scores = reranker.compute_score(pairs, normalize=True)
@@ -803,6 +838,7 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         text = passage.get("text", "")
         keyword_field = passage.get("keyword", "")
         summary_field = passage.get("summary", "")
+        context_field = passage.get("context", "")
         
         # Calculate text relevance
         text_score = calculate_bm25_like_score(text, question_keywords, question_content_tokens)
@@ -813,6 +849,8 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
             metadata_score += calculate_bm25_like_score(keyword_field, question_keywords, question_content_tokens) * 0.5
         if summary_field:
             metadata_score += calculate_bm25_like_score(summary_field, question_keywords, question_content_tokens) * 0.5
+        if context_field:
+            metadata_score += calculate_bm25_like_score(context_field, question_keywords, question_content_tokens) * settings.CONTEXT_SCORE_WEIGHT
         
         # Source type bonus (hybrid search is generally better)
         source_score = 0.3 if passage.get("source") == "hybrid" else 0.1
@@ -837,8 +875,7 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         final_score = (
             vector_score * settings.VECTOR_SCORE_WEIGHT +      # Vector similarity
             text_score * settings.TEXT_SCORE_WEIGHT +          # Text relevance (highest weight)
-            metadata_score * settings.METADATA_SCORE_WEIGHT +  # Metadata signals
-            source_score +                                      # Source type
+            metadata_score * settings.METADATA_SCORE_WEIGHT +  # Metadata signals (base)
             quality_score                                       # Quality signals
         )
         
@@ -985,6 +1022,52 @@ async def _generate_embedding(text: str) -> List[float]:
     """Legacy function for backward compatibility - generates only dense embedding"""
     embedding_data = await _generate_bge_m3_embedding(text)
     return embedding_data['dense']
+
+
+async def _generate_chunk_context(doc_content: str, chunk_content: str) -> str:
+    """Generates a succinct context for a chunk based on the full document."""
+    try:
+        import httpx
+
+        # Prompt inspired by Anthropic's contextual retrieval cookbook
+        DOCUMENT_CONTEXT_PROMPT = f"""
+        <document>
+        {doc_content}
+        </document>
+        """
+
+        CHUNK_CONTEXT_PROMPT = f"""
+        Here is the chunk we want to situate within the whole document
+        <chunk>
+        {chunk_content}
+        </chunk>
+
+        Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
+        Answer only with the succinct context and nothing else.
+        """
+
+        llm_payload = {
+            "model": settings.OLLAMA_MODEL,
+            "temperature": 0.0,
+            "messages": [
+                {"role": "user", "content": DOCUMENT_CONTEXT_PROMPT + CHUNK_CONTEXT_PROMPT},
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT) as client:
+            llm_response = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/v1/chat/completions",
+                json=llm_payload,
+            )
+            llm_response.raise_for_status()
+            llm_data = llm_response.json()
+        
+        context = llm_data["choices"][0]["message"]["content"]
+        return context.strip()
+
+    except Exception as e:
+        print(f"DEBUG: Context generation failed: {e}")
+        return "" # Return empty string on failure
 
 
 async def _fallback_llm_response(question: str, domain: str) -> str:

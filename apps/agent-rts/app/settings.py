@@ -43,6 +43,7 @@ class AgentSettings(BaseSettings):
     VECTOR_SCORE_WEIGHT: float = 0.3
     TEXT_SCORE_WEIGHT: float = 2.0
     METADATA_SCORE_WEIGHT: float = 1.0
+    CONTEXT_SCORE_WEIGHT: float = 0.8
     
     # BM25 parameters (can be tuned)
     BM25_K1_KEYWORD: float = 1.5  # Term frequency saturation for keywords
@@ -52,6 +53,9 @@ class AgentSettings(BaseSettings):
     MAX_KEYWORDS: int = 8
     KEYWORD_FREQ_WEIGHT: float = 2.0
     KEYWORD_POSITION_WEIGHT: float = 0.5
+    
+    # Query expansion settings
+    MAX_EXPANDED_QUERIES: int = 3
     
     # Configurable timeouts
     LLM_TIMEOUT: int = 30
