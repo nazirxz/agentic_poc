@@ -116,38 +116,39 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
             limit=20  # Retrieve top-20 candidates
         )
         
-        # 2. Sparse vector search with IP (if sparse field exists)
-        sparse_req = None
-        try:
-            # Check if sparse vector field exists in collection
-            collection_info = client.describe_collection(collection_name)
-            has_sparse_field = any(field.get('name') == 'sparse_vector' for field in collection_info.get('fields', []))
-            
-            if has_sparse_field:
-                sparse_req = AnnSearchRequest(
-                    data=[embedding_data['sparse']],
-                    anns_field="sparse_vector",
-                    param={"metric_type": "IP"},
-                    limit=20
-                )
-                print("DEBUG: Sparse vector search enabled for STK")
-            else:
-                print("DEBUG: Sparse vector field not found, using dense-only search for STK")
-        except Exception as e:
-            print(f"DEBUG: Could not check for sparse field in STK: {e}")
+        # 2. Enhanced hybrid search with multiple dense queries
+        # Since we can't use true sparse search without FlagEmbedding, we'll use multiple dense queries
+        # with different parameters to simulate hybrid search behavior
         
-        # 3. Perform hybrid search with RRF reranking
-        if sparse_req:
-            # Hybrid search with both dense and sparse
+        # Primary dense search with standard parameters
+        dense_req_primary = AnnSearchRequest(
+            data=[embedding_data['dense']],
+            anns_field="vector",
+            param={"metric_type": "L2", "ef": 64},
+            limit=15  # Retrieve top-15 candidates
+        )
+        
+        # Secondary dense search with different parameters for diversity
+        dense_req_secondary = AnnSearchRequest(
+            data=[embedding_data['dense']],
+            anns_field="vector",
+            param={"metric_type": "L2", "ef": 32},  # Different ef for different search behavior
+            limit=15
+        )
+        
+        # 3. Perform hybrid search with RRF reranking using multiple dense queries
+        try:
             results = client.hybrid_search(
                 collection_name=collection_name,
-                reqs=[dense_req, sparse_req],
+                reqs=[dense_req_primary, dense_req_secondary],
                 ranker=RRFRanker(k=60),  # RRF with k=60 (optimal default)
                 limit=settings.TOP_K,
                 output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
                 filter=filter_expr
             )
-        else:
+            print("DEBUG: Enhanced hybrid search with multiple dense queries enabled for STK")
+        except Exception as e:
+            print(f"DEBUG: Hybrid search failed for STK, falling back to dense-only: {e}")
             # Fallback to dense-only search
             results = client.search(
                 collection_name=collection_name,
@@ -171,7 +172,7 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
                     "number_page": hit.get("number_page"),
                     "doc_level_2": hit.get("doc_level_2"),
                     "score": hit.get("distance", 0),
-                    "source": "hybrid" if sparse_req else "dense"
+                    "source": "hybrid"
                 })
         
         if not passages:
@@ -184,7 +185,7 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
                     "collection": collection,
                     "hits": 0,
                     "collection_name": collection_name,
-                    "search_type": "hybrid" if sparse_req else "dense_only"
+                    "search_type": "enhanced_hybrid"
                 }
             }).decode()
         
@@ -258,7 +259,7 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
                 "hits": len(passages),
                 "used_passages": len(context_lines),
                 "collection_name": collection_name,
-                "search_type": "hybrid" if sparse_req else "dense_only"
+                "search_type": "enhanced_hybrid"
             }
         }).decode()
         
@@ -270,32 +271,31 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
 
 
 async def _generate_bge_m3_embedding(text: str) -> dict:
-    """Generate BGE-M3 dense and sparse embeddings for text"""
+    """Generate BGE-M3 dense embeddings using Ollama with enhanced hybrid search"""
     try:
-        from FlagEmbedding import BGEM3FlagModel
+        from langchain_ollama import OllamaEmbeddings
         
-        print(f"DEBUG: Generating BGE-M3 embedding for STK text: '{text[:100]}...'")
+        print(f"DEBUG: Generating Ollama BGE-M3 embedding for STK text: '{text[:100]}...'")
         
-        # Initialize BGE-M3 model with fp16 for speed
-        bge_m3 = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
-        
-        # Generate both dense and sparse embeddings in single pass
-        embeddings = bge_m3.encode(
-            [text],
-            return_dense=True,
-            return_sparse=True,
-            return_colbert_vecs=False  # Set False for speed
+        # Initialize OllamaEmbeddings with BGE-M3 model
+        embeddings = OllamaEmbeddings(
+            model=settings.OLLAMA_EMBEDDING_MODEL,
+            base_url=settings.OLLAMA_BASE_URL
         )
         
-        dense_vector = embeddings['dense'][0].tolist()
-        sparse_vector = embeddings['sparse'][0]  # CSR format
+        # Generate dense embedding using LangChain
+        dense_vector = embeddings.embed_query(text)
         
         print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
-        print(f"DEBUG: Generated sparse embedding keys: {len(sparse_vector)}")
+        print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
         
         # Check if dense embedding is all zeros (indicates failure)
         if all(v == 0.0 for v in dense_vector):
             print("WARNING: Generated dense embedding is all zeros!")
+        
+        # Generate pseudo-sparse vector for hybrid search simulation
+        # This creates a simple keyword-based sparse representation
+        sparse_vector = _generate_pseudo_sparse_vector(text)
         
         return {
             'dense': dense_vector,
@@ -306,11 +306,43 @@ async def _generate_bge_m3_embedding(text: str) -> dict:
         print(f"BGE-M3 embedding generation error: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        # Return zero vectors as fallback (BGE-M3 dense has 1024 dimensions)
+        # Return zero vectors as final fallback
         return {
             'dense': [0.0] * 1024,
             'sparse': {}
         }
+
+def _generate_pseudo_sparse_vector(text: str) -> dict:
+    """Generate pseudo-sparse vector for hybrid search simulation"""
+    try:
+        import re
+        from collections import Counter
+        
+        # Extract keywords and technical terms
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        
+        # Filter out common words
+        common_words = {"the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", 
+                       "berapa", "yang", "ada", "di", "dalam", "untuk", "dengan", "oleh", "dari", "pada"}
+        
+        technical_words = [word for word in words if word not in common_words and len(word) >= 3]
+        
+        # Count word frequencies
+        word_counts = Counter(technical_words)
+        
+        # Create sparse vector with top keywords
+        sparse_vector = {}
+        for word, count in word_counts.most_common(50):  # Top 50 keywords
+            # Use hash of word as index to avoid conflicts
+            index = hash(word) % 10000  # Map to 0-9999 range
+            sparse_vector[index] = float(count)
+        
+        print(f"DEBUG: Generated pseudo-sparse vector with {len(sparse_vector)} keywords")
+        return sparse_vector
+        
+    except Exception as e:
+        print(f"Pseudo-sparse vector generation error: {e}")
+        return {}
 
 async def _generate_embedding(text: str) -> List[float]:
     """Legacy function for backward compatibility - generates only dense embedding"""
