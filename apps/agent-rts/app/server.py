@@ -1151,7 +1151,9 @@ def create_custom_agent():
     workflow.add_node("agent", custom_agent_executor)
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", END)
-    return workflow.compile()
+    # By returning the tool output directly, we prevent the LLM from summarizing it.
+    # The 'content' of the AIMessage will be the raw JSON string from the tool.
+    return workflow.compile().with_config(output_keys=["messages"])
 
 agent_executor = create_custom_agent()
 
