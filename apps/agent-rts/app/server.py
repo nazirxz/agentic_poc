@@ -308,12 +308,12 @@ async def answer_rts_general(question: str) -> str:
                         results = client.search(
                             collection_name=settings.MILVUS_COLLECTION_NAME,
                             data=[primary_embedding_data['dense']],
-                            anns_field="vector",
-                            search_params=search_params,
-                            limit=settings.TOP_K,
-                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-                            filter=f'category == "{settings.CATEGORY_FILTER}"'
-                        )
+                        anns_field="vector",
+                        search_params=search_params,
+                        limit=settings.TOP_K,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                        filter=f'category == "{settings.CATEGORY_FILTER}"'
+                    )
                     print(f"DEBUG: Search with category filter returned {len(results[0]) if results else 0} hits")
                 else:
                     print(f"DEBUG: Category filter '{settings.CATEGORY_FILTER}' not in available categories, using all results")
@@ -382,8 +382,8 @@ async def answer_rts_general(question: str) -> str:
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                "mode": "bge_m3_hybrid_search_with_reranking",
-                "hybrid_hits": 0,
+                    "mode": "bge_m3_hybrid_search_with_reranking",
+                    "hybrid_hits": 0,
                     "keyword_hits": 0,
                     "total_hits": 0,
                     "collection": settings.MILVUS_COLLECTION_NAME,
@@ -392,7 +392,10 @@ async def answer_rts_general(question: str) -> str:
                     "embedding_dimension": len(primary_embedding_data['dense']),
                     "search_limit": settings.TOP_K,
                     "query_expansion": len(expanded_queries) > 1,
-                    "reranking_applied": True
+                    "reranking_applied": True,
+                    "reason": "no_passages_after_filtering",
+                    "min_relevance_score": settings.MIN_RELEVANCE_SCORE,
+                    "extracted_keywords": _extract_keywords_from_question(question)
                 }
             }).decode()
         
@@ -405,19 +408,35 @@ async def answer_rts_general(question: str) -> str:
         relevant_passages = passages[:min(settings.MAX_CONTEXT, settings.MAX_PASSAGES)]
         print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking (limited to prevent timeout)")
         
-        # Quality filtering based on general criteria (no hardcoded terms)
+        # Quality filtering based on general criteria
         quality_passages = []
         
         for passage in relevant_passages:
-            text = passage.get("text", "")
+            text = passage.get("text", "").lower()
             
             # Skip very short content (likely not informative)
             if len(text) < settings.MIN_TEXT_LENGTH:
                 print(f"DEBUG: Skipping very short passage: {text[:50]}...")
                 continue
             
-            # Skip passages with very low relevance score (already filtered, but double-check)
+            # Skip passages with very low relevance score
             if passage.get("relevance_score", 0) < settings.MIN_RELEVANCE_SCORE:
+                continue
+            
+            # Skip passages that are mostly administrative/approval headers
+            # Check if passage has high density of non-content markers
+            admin_markers = text.count("subject") + text.count("date") + text.count("persetujuan") + text.count("approval")
+            text_length = len(text.split())
+            
+            # If more than 30% of short text is admin markers, likely not technical content
+            if text_length < 50 and admin_markers > 3:
+                print(f"DEBUG: Skipping administrative header: {text[:50]}...")
+                continue
+            
+            # Skip passages that are mostly HTML/images
+            html_markers = text.count("<!--") + text.count("image") + text.count("&amp;")
+            if html_markers > 5 and text_length < 100:
+                print(f"DEBUG: Skipping HTML/image-heavy passage: {text[:50]}...")
                 continue
             
             quality_passages.append(passage)
@@ -454,25 +473,26 @@ async def answer_rts_general(question: str) -> str:
         
         # Generate answer using LLM (production-ready prompt engineering)
         system_prompt = (
-            f"Anda adalah asisten teknis untuk domain {settings.DOMAIN}. "
-            "Tugas Anda: jawab pertanyaan berdasarkan HANYA informasi yang EKSPLISIT tercantum dalam konteks. "
-            "\n\nPrinsip penting:\n"
-            "- Jawab hanya jika ada fakta spesifik yang menjawab pertanyaan\n"
-            "- Jangan buat asumsi atau generalisasi\n"
-            "- Jangan rangkum isi dokumen jika tidak diminta\n"
-            f"- Jika informasi tidak tersedia, katakan dengan jelas: '{settings.REFUSAL_TEXT}'"
+            f"Anda adalah asisten teknis ahli untuk domain {settings.DOMAIN}. "
+            "Tugas Anda adalah menjawab pertanyaan berdasarkan konteks dokumen yang diberikan.\n\n"
+            "Prinsip penting:\n"
+            "- PRIORITAS: Cari dan jawab informasi spesifik yang diminta\n"
+            "- Jika ada informasi relevan di konteks, JAWAB dengan detail\n"
+            "- Gunakan bahasa teknis yang tepat dan profesional\n"
+            "- Sertakan nilai, angka, atau spesifikasi jika ada\n"
+            f"- HANYA jika sama sekali tidak ada informasi relevan, jawab: '{settings.REFUSAL_TEXT}'"
         )
         
         user_prompt = (
-            f"Konteks dari dokumen:\n{context}\n\n"
+            f"Konteks dari dokumen {settings.DOMAIN}:\n{context}\n\n"
             f"Pertanyaan: {question}\n\n"
             "Instruksi:\n"
-            "1. Baca konteks dengan cermat\n"
-            "2. Cari informasi spesifik yang menjawab pertanyaan\n"
-            "3. Jawab berdasarkan fakta yang ada dalam konteks\n"
-            "4. Sertakan referensi dokumen jika relevan\n"
-            f"5. Jika informasi tidak ditemukan: '{settings.REFUSAL_TEXT}'\n\n"
-            "Jawaban:"
+            "1. Analisis konteks untuk menemukan informasi yang menjawab pertanyaan\n"
+            "2. Jika ada informasi teknis, nilai, atau spesifikasi yang relevan - JAWAB dengan lengkap\n"
+            "3. Jika konteks membahas topik terkait - berikan penjelasan berdasarkan konteks\n"
+            "4. Sertakan referensi dokumen untuk kredibilitas\n"
+            f"5. Hanya jika konteks TIDAK relevan sama sekali dengan pertanyaan, jawab: '{settings.REFUSAL_TEXT}'\n\n"
+            "Jawaban (berikan detail teknis jika ada):"
         )
         
         llm_payload = {
@@ -690,8 +710,21 @@ async def _apply_cross_encoder_reranking(passages: List[dict], question: str) ->
         # Sort by reranker score (higher is better)
         passages.sort(key=lambda x: x.get("reranker_score", 0), reverse=True)
         
-        # Return top N passages after reranking
-        final_passages = passages[:settings.FINAL_TOP_K]
+        # Filter by minimum reranker score to remove irrelevant results
+        filtered_passages = [
+            p for p in passages 
+            if p.get("reranker_score", 0) >= settings.MIN_RERANKER_SCORE
+        ]
+        
+        print(f"DEBUG: Reranker filtered: {len(filtered_passages)}/{len(passages)} passages above threshold {settings.MIN_RERANKER_SCORE}")
+        
+        # If too few passages pass threshold, take top N anyway but warn
+        if len(filtered_passages) < 3:
+            print(f"WARNING: Only {len(filtered_passages)} passages above reranker threshold, taking top {settings.FINAL_TOP_K} anyway")
+            final_passages = passages[:settings.FINAL_TOP_K]
+        else:
+            # Return top N passages after reranking
+            final_passages = filtered_passages[:settings.FINAL_TOP_K]
         
         print(f"DEBUG: Cross-encoder reranking completed, selected top {len(final_passages)} passages")
         print(f"DEBUG: Top 3 reranked passages:")

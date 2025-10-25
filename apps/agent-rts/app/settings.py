@@ -30,6 +30,7 @@ class AgentSettings(BaseSettings):
     USE_RERANKER: bool = True
     RERANKER_TOP_K: int = 20  # Get more candidates before reranking
     FINAL_TOP_K: int = 5  # Final results after reranking
+    MIN_RERANKER_SCORE: float = 0.3  # Minimum reranker score to keep passage
     
     # Configurable search parameters
     MAX_PASSAGES: int = 4
