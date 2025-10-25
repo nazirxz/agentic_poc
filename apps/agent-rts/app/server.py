@@ -162,7 +162,7 @@ async def answer_rts_general(question: str) -> str:
                     
                     # Perform hybrid search with RRF ranker
                     results = client.hybrid_search(
-                        collection_name=settings.MILVUS_COLLECTION_NAME,
+            collection_name=settings.MILVUS_COLLECTION_NAME,
                         reqs=[dense_req, sparse_req],
                         ranker=RRFRanker(k=60),  # RRF with k=60 (optimal)
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
@@ -174,8 +174,8 @@ async def answer_rts_general(question: str) -> str:
                     results = client.search(
                         collection_name=settings.MILVUS_COLLECTION_NAME,
                         data=[primary_embedding_data['dense']],
-                        anns_field="vector",
-                        search_params=search_params,
+            anns_field="vector",
+            search_params=search_params,
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
                         output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
                     )
@@ -198,8 +198,8 @@ async def answer_rts_general(question: str) -> str:
                 anns_field="vector",
                 search_params=search_params,
                 limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
-            )
+            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+        )
         
         print(f"DEBUG: Hybrid search returned {len(results[0]) if results else 0} hits")
         
@@ -264,19 +264,46 @@ async def answer_rts_general(question: str) -> str:
             if settings.CATEGORY_FILTER and settings.CATEGORY_FILTER != "rokan_technical_standard":
                 if settings.CATEGORY_FILTER in available_categories:
                     print(f"DEBUG: Applying category filter: {settings.CATEGORY_FILTER}")
-                    # Re-search with category filter using enhanced hybrid search
-                    try:
-                        # Enhanced hybrid search with category filter
-                        results = client.hybrid_search(
-                            collection_name=settings.MILVUS_COLLECTION_NAME,
-                            reqs=[dense_req_primary, dense_req_secondary],
-                            ranker=RRFRanker(k=60),
-                            limit=settings.TOP_K,
-                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-                            filter=f'category == "{settings.CATEGORY_FILTER}"'
-                        )
-                    except Exception as e:
-                        print(f"DEBUG: Hybrid search with category filter failed, using dense-only: {e}")
+                    # Re-search with category filter
+                    # Check if we have sparse embeddings for hybrid search
+                    has_sparse_for_filter = has_sparse and settings.USE_BGE_M3_HYBRID
+                    
+                    if has_sparse_for_filter:
+                        try:
+                            # Hybrid search with category filter
+                            dense_req_filter = AnnSearchRequest(
+                                data=[primary_embedding_data['dense']],
+                                anns_field="vector",
+                                param={"metric_type": "L2", "ef": 64},
+                                limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K
+                            )
+                            sparse_req_filter = AnnSearchRequest(
+                                data=[primary_embedding_data['sparse']],
+                                anns_field="sparse_vector",
+                                param={"metric_type": "IP"},
+                                limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K
+                            )
+                            results = client.hybrid_search(
+                                collection_name=settings.MILVUS_COLLECTION_NAME,
+                                reqs=[dense_req_filter, sparse_req_filter],
+                                ranker=RRFRanker(k=60),
+                                limit=settings.TOP_K,
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                                filter=f'category == "{settings.CATEGORY_FILTER}"'
+                            )
+                        except Exception as e:
+                            print(f"DEBUG: Hybrid search with category filter failed, using dense-only: {e}")
+                            # Dense-only search with category filter
+                            results = client.search(
+                                collection_name=settings.MILVUS_COLLECTION_NAME,
+                                data=[primary_embedding_data['dense']],
+                                anns_field="vector",
+                                search_params=search_params,
+                                limit=settings.TOP_K,
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                                filter=f'category == "{settings.CATEGORY_FILTER}"'
+                            )
+                    else:
                         # Dense-only search with category filter
                         results = client.search(
                             collection_name=settings.MILVUS_COLLECTION_NAME,
@@ -357,8 +384,8 @@ async def answer_rts_general(question: str) -> str:
                 "diagnostic": {
                 "mode": "bge_m3_hybrid_search_with_reranking",
                 "hybrid_hits": 0,
-                "keyword_hits": 0,
-                "total_hits": 0,
+                    "keyword_hits": 0,
+                    "total_hits": 0,
                     "collection": settings.MILVUS_COLLECTION_NAME,
                     "search_strategy": "hybrid_no_filter",
                     "available_categories": available_categories,
@@ -851,11 +878,36 @@ async def _generate_bge_m3_embedding(text: str) -> dict:
                 return_colbert_vecs=False  # Disable ColBERT for speed
             )
             
-            dense_vector = embeddings['dense'][0].tolist()
-            sparse_vector = embeddings['sparse'][0]  # Sparse in CSR format
+            # Debug: Print embeddings structure
+            print(f"DEBUG: Embeddings keys: {embeddings.keys() if isinstance(embeddings, dict) else type(embeddings)}")
+            
+            # Handle different output formats from BGE-M3
+            if isinstance(embeddings, dict):
+                # Standard dictionary format
+                dense_vector = embeddings.get('dense_vecs', embeddings.get('dense', []))[0]
+                sparse_vector = embeddings.get('lexical_weights', embeddings.get('sparse', {}))[0]
+                
+                # Convert numpy array to list if needed
+                if hasattr(dense_vector, 'tolist'):
+                    dense_vector = dense_vector.tolist()
+            else:
+                # If embeddings is not a dict, try to extract from object
+                dense_vector = getattr(embeddings, 'dense_vecs', getattr(embeddings, 'dense', None))
+                if dense_vector is not None:
+                    dense_vector = dense_vector[0]
+                    if hasattr(dense_vector, 'tolist'):
+                        dense_vector = dense_vector.tolist()
+                else:
+                    raise ValueError(f"Cannot extract dense embeddings from: {type(embeddings)}")
+                
+                sparse_vector = getattr(embeddings, 'lexical_weights', getattr(embeddings, 'sparse', {}))
+                if sparse_vector and len(sparse_vector) > 0:
+                    sparse_vector = sparse_vector[0]
+                else:
+                    sparse_vector = {}
             
             print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
-            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector)} non-zero elements")
+            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector) if isinstance(sparse_vector, dict) else 'N/A'} non-zero elements")
             print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
             
             return {

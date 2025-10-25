@@ -298,11 +298,36 @@ async def _generate_bge_m3_embedding(text: str) -> dict:
                 return_colbert_vecs=False
             )
             
-            dense_vector = embeddings['dense'][0].tolist()
-            sparse_vector = embeddings['sparse'][0]
+            # Debug: Print embeddings structure
+            print(f"DEBUG: Embeddings keys: {embeddings.keys() if isinstance(embeddings, dict) else type(embeddings)}")
+            
+            # Handle different output formats from BGE-M3
+            if isinstance(embeddings, dict):
+                # Standard dictionary format
+                dense_vector = embeddings.get('dense_vecs', embeddings.get('dense', []))[0]
+                sparse_vector = embeddings.get('lexical_weights', embeddings.get('sparse', {}))[0]
+                
+                # Convert numpy array to list if needed
+                if hasattr(dense_vector, 'tolist'):
+                    dense_vector = dense_vector.tolist()
+            else:
+                # If embeddings is not a dict, try to extract from object
+                dense_vector = getattr(embeddings, 'dense_vecs', getattr(embeddings, 'dense', None))
+                if dense_vector is not None:
+                    dense_vector = dense_vector[0]
+                    if hasattr(dense_vector, 'tolist'):
+                        dense_vector = dense_vector.tolist()
+                else:
+                    raise ValueError(f"Cannot extract dense embeddings from: {type(embeddings)}")
+                
+                sparse_vector = getattr(embeddings, 'lexical_weights', getattr(embeddings, 'sparse', {}))
+                if sparse_vector and len(sparse_vector) > 0:
+                    sparse_vector = sparse_vector[0]
+                else:
+                    sparse_vector = {}
             
             print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
-            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector)} non-zero elements")
+            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector) if isinstance(sparse_vector, dict) else 'N/A'} non-zero elements")
             
             return {
                 'dense': dense_vector,
