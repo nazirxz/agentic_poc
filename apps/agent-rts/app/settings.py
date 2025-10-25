@@ -15,11 +15,21 @@ class AgentSettings(BaseSettings):
     STYLE: str = "teknis-formal"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3:0.6b"
-    OLLAMA_EMBEDDING_MODEL: str = "bge-m3"
-
+    
+    # BGE-M3 Local Model Paths
+    BGE_M3_MODEL_PATH: str = "/local/urbuddy_rag/Milvus_Prod/llm_models/bge-m3"
+    BGE_RERANKER_MODEL_PATH: str = "/local/urbuddy_rag/Milvus_Prod/llm_models/bge-reranker-v2-m3"
+    
+    # Use BGE-M3 for both dense and sparse embeddings
+    USE_BGE_M3_HYBRID: bool = True  # Enable hybrid search with dense + sparse
+    
     MILVUS_CONNECTION_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION_NAME: str = "rokan_technical_standard"
-    RERANK_URL: str = "http://localhost:8082"
+    
+    # Enable reranker for better results
+    USE_RERANKER: bool = True
+    RERANKER_TOP_K: int = 20  # Get more candidates before reranking
+    FINAL_TOP_K: int = 5  # Final results after reranking
     
     # Configurable search parameters
     MAX_PASSAGES: int = 4

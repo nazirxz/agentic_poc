@@ -271,78 +271,68 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
 
 
 async def _generate_bge_m3_embedding(text: str) -> dict:
-    """Generate BGE-M3 dense embeddings using Ollama with enhanced hybrid search"""
+    """
+    Generate BGE-M3 dense and sparse embeddings using local model
+    Following Milvus best practices for hybrid retrieval
+    Reference: https://milvus.io/docs/contextual_retrieval_with_milvus.md
+    """
     try:
-        from langchain_ollama import OllamaEmbeddings
-        
-        print(f"DEBUG: Generating Ollama BGE-M3 embedding for STK text: '{text[:100]}...'")
-        
-        # Initialize OllamaEmbeddings with BGE-M3 model
-        embeddings = OllamaEmbeddings(
-            model=settings.OLLAMA_EMBEDDING_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
-        )
-        
-        # Generate dense embedding using LangChain
-        dense_vector = embeddings.embed_query(text)
-        
-        print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
-        print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
-        
-        # Check if dense embedding is all zeros (indicates failure)
-        if all(v == 0.0 for v in dense_vector):
-            print("WARNING: Generated dense embedding is all zeros!")
-        
-        # Generate pseudo-sparse vector for hybrid search simulation
-        # This creates a simple keyword-based sparse representation
-        sparse_vector = _generate_pseudo_sparse_vector(text)
-        
-        return {
-            'dense': dense_vector,
-            'sparse': sparse_vector
-        }
+        if settings.USE_BGE_M3_HYBRID:
+            # Use FlagEmbedding BGE-M3 for true hybrid search
+            from FlagEmbedding import BGEM3FlagModel
+            
+            print(f"DEBUG: Generating BGE-M3 hybrid embedding for STK text: '{text[:100]}...'")
+            
+            # Initialize BGE-M3 model from local path
+            bge_m3 = BGEM3FlagModel(
+                settings.BGE_M3_MODEL_PATH,
+                use_fp16=True,
+                device='cuda'
+            )
+            
+            # Generate both dense and sparse embeddings in single pass
+            embeddings = bge_m3.encode(
+                [text],
+                return_dense=True,
+                return_sparse=True,
+                return_colbert_vecs=False
+            )
+            
+            dense_vector = embeddings['dense'][0].tolist()
+            sparse_vector = embeddings['sparse'][0]
+            
+            print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
+            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector)} non-zero elements")
+            
+            return {
+                'dense': dense_vector,
+                'sparse': sparse_vector
+            }
+        else:
+            # Fallback: Use Ollama for dense-only embeddings
+            from langchain_ollama import OllamaEmbeddings
+            
+            embeddings = OllamaEmbeddings(
+                model="bge-m3",
+                base_url=settings.OLLAMA_BASE_URL
+            )
+            
+            dense_vector = embeddings.embed_query(text)
+            
+            return {
+                'dense': dense_vector,
+                'sparse': {}
+            }
         
     except Exception as e:
         print(f"BGE-M3 embedding generation error: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        # Return zero vectors as final fallback
+        
         return {
             'dense': [0.0] * 1024,
             'sparse': {}
         }
-
-def _generate_pseudo_sparse_vector(text: str) -> dict:
-    """Generate pseudo-sparse vector for hybrid search simulation"""
-    try:
-        import re
-        from collections import Counter
-        
-        # Extract keywords and technical terms
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-        
-        # Filter out common words
-        common_words = {"the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", 
-                       "berapa", "yang", "ada", "di", "dalam", "untuk", "dengan", "oleh", "dari", "pada"}
-        
-        technical_words = [word for word in words if word not in common_words and len(word) >= 3]
-        
-        # Count word frequencies
-        word_counts = Counter(technical_words)
-        
-        # Create sparse vector with top keywords
-        sparse_vector = {}
-        for word, count in word_counts.most_common(50):  # Top 50 keywords
-            # Use hash of word as index to avoid conflicts
-            index = hash(word) % 10000  # Map to 0-9999 range
-            sparse_vector[index] = float(count)
-        
-        print(f"DEBUG: Generated pseudo-sparse vector with {len(sparse_vector)} keywords")
-        return sparse_vector
-        
-    except Exception as e:
-        print(f"Pseudo-sparse vector generation error: {e}")
-        return {}
 
 async def _generate_embedding(text: str) -> List[float]:
     """Legacy function for backward compatibility - generates only dense embedding"""

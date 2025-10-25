@@ -128,45 +128,76 @@ async def answer_rts_general(question: str) -> str:
             limit=20  # Retrieve top-20 candidates
         )
         
-        # 2. Enhanced hybrid search with multiple dense queries
-        # Since we can't use true sparse search without FlagEmbedding, we'll use multiple dense queries
-        # with different parameters to simulate hybrid search behavior
+        # 2. Hybrid search with BGE-M3 dense + sparse embeddings
+        # Following Milvus best practices: https://milvus.io/docs/contextual_retrieval_with_milvus.md
         
-        # Primary dense search with standard parameters
-        dense_req_primary = AnnSearchRequest(
-            data=[primary_embedding_data['dense']],
-            anns_field="vector",
-            param={"metric_type": "L2", "ef": 64},
-            limit=15  # Retrieve top-15 candidates
-        )
+        # Check if we have sparse embeddings available
+        has_sparse = len(primary_embedding_data.get('sparse', {})) > 0
         
-        # Secondary dense search with different parameters for diversity
-        dense_req_secondary = AnnSearchRequest(
-            data=[primary_embedding_data['dense']],
-            anns_field="vector",
-            param={"metric_type": "L2", "ef": 32},  # Different ef for different search behavior
-            limit=15
-        )
-        
-        # 3. Perform hybrid search with RRF reranking using multiple dense queries
-        try:
-            results = client.hybrid_search(
-                collection_name=settings.MILVUS_COLLECTION_NAME,
-                reqs=[dense_req_primary, dense_req_secondary],
-                ranker=RRFRanker(k=60),  # RRF with k=60 (optimal default)
-                limit=settings.TOP_K,
-                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+        if has_sparse and settings.USE_BGE_M3_HYBRID:
+            # True hybrid search with dense and sparse vectors
+            print("DEBUG: Using BGE-M3 hybrid search (dense + sparse)")
+            
+            # Dense search with HNSW index
+            dense_req = AnnSearchRequest(
+                data=[primary_embedding_data['dense']],
+                anns_field="vector",
+                param={"metric_type": "L2", "ef": 64},
+                limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K
             )
-            print("DEBUG: Enhanced hybrid search with multiple dense queries enabled")
-        except Exception as e:
-            print(f"DEBUG: Hybrid search failed, falling back to dense-only: {e}")
+            
+            # Sparse search with inverted index
+            # Check if collection has sparse_vector field
+            try:
+                collection_info = client.describe_collection(settings.MILVUS_COLLECTION_NAME)
+                has_sparse_field = any(field.get('name') == 'sparse_vector' for field in collection_info.get('fields', []))
+                
+                if has_sparse_field:
+                    sparse_req = AnnSearchRequest(
+                        data=[primary_embedding_data['sparse']],
+                        anns_field="sparse_vector",
+                        param={"metric_type": "IP"},  # Inner Product for sparse
+                        limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K
+                    )
+                    
+                    # Perform hybrid search with RRF ranker
+                    results = client.hybrid_search(
+                        collection_name=settings.MILVUS_COLLECTION_NAME,
+                        reqs=[dense_req, sparse_req],
+                        ranker=RRFRanker(k=60),  # RRF with k=60 (optimal)
+                        limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                    )
+                    print(f"DEBUG: Hybrid search (dense + sparse) completed, retrieved {len(results[0]) if results else 0} candidates")
+                else:
+                    print("DEBUG: Sparse field not found, using dense-only search")
+                    results = client.search(
+                        collection_name=settings.MILVUS_COLLECTION_NAME,
+                        data=[primary_embedding_data['dense']],
+                        anns_field="vector",
+                        search_params=search_params,
+                        limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                    )
+            except Exception as e:
+                print(f"DEBUG: Error in sparse search: {e}, falling back to dense-only")
+                results = client.search(
+                    collection_name=settings.MILVUS_COLLECTION_NAME,
+                    data=[primary_embedding_data['dense']],
+                    anns_field="vector",
+                    search_params=search_params,
+                    limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+                )
+        else:
             # Fallback to dense-only search
+            print("DEBUG: Using dense-only search")
             results = client.search(
                 collection_name=settings.MILVUS_COLLECTION_NAME,
                 data=[primary_embedding_data['dense']],
                 anns_field="vector",
                 search_params=search_params,
-                limit=settings.TOP_K,
+                limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
                 output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
             )
         
@@ -311,8 +342,12 @@ async def answer_rts_general(question: str) -> str:
         
         print(f"DEBUG: Combined results: {len(passages)} passages ({len([p for p in passages if p['source'] == 'hybrid'])} hybrid, {len([p for p in passages if p['source'] == 'keyword'])} keyword)")
         
-        # Rerank passages based on relevance
+        # Apply BM25-based reranking
         passages = await _rerank_passages(passages, question)
+        
+        # Apply cross-encoder reranking if enabled
+        if settings.USE_RERANKER and len(passages) > 0:
+            passages = await _apply_cross_encoder_reranking(passages, question)
         
         if not passages:
             return orjson.dumps({
@@ -589,6 +624,62 @@ async def _expand_query(question: str) -> List[str]:
     return expanded[:1]  # Return only original query
 
 
+async def _apply_cross_encoder_reranking(passages: List[dict], question: str) -> List[dict]:
+    """
+    Apply cross-encoder reranking using BGE-reranker-v2-m3
+    Following Milvus best practices: https://milvus.io/docs/contextual_retrieval_with_milvus.md
+    
+    This provides more accurate relevance scoring than vector similarity alone.
+    """
+    if not passages:
+        return passages
+    
+    try:
+        from FlagEmbedding import FlagReranker
+        
+        print(f"DEBUG: Applying BGE cross-encoder reranking to {len(passages)} passages")
+        
+        # Initialize BGE reranker from local path
+        reranker = FlagReranker(
+            settings.BGE_RERANKER_MODEL_PATH,
+            use_fp16=True,  # Use FP16 for faster inference
+            device='cuda'  # Use GPU if available
+        )
+        
+        # Prepare query-passage pairs for reranking
+        pairs = [[question, passage.get("text", "")] for passage in passages]
+        
+        # Get reranking scores
+        scores = reranker.compute_score(pairs, normalize=True)
+        
+        # If scores is a single value, wrap it in a list
+        if not isinstance(scores, list):
+            scores = [scores]
+        
+        # Update passages with reranker scores
+        for i, passage in enumerate(passages):
+            passage["reranker_score"] = scores[i]
+        
+        # Sort by reranker score (higher is better)
+        passages.sort(key=lambda x: x.get("reranker_score", 0), reverse=True)
+        
+        # Return top N passages after reranking
+        final_passages = passages[:settings.FINAL_TOP_K]
+        
+        print(f"DEBUG: Cross-encoder reranking completed, selected top {len(final_passages)} passages")
+        print(f"DEBUG: Top 3 reranked passages:")
+        for i, passage in enumerate(final_passages[:3]):
+            print(f"  {i+1}. Reranker score: {passage.get('reranker_score', 0):.4f}, Text: {passage['text'][:100]}...")
+        
+        return final_passages
+        
+    except Exception as e:
+        print(f"DEBUG: Cross-encoder reranking error: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        # Return original passages if reranking fails
+        return passages[:settings.FINAL_TOP_K]
+
 async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
     """
     Rerank passages using BM25-like scoring + metadata signals (production-ready)
@@ -732,78 +823,78 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
 
 
 async def _generate_bge_m3_embedding(text: str) -> dict:
-    """Generate BGE-M3 dense embeddings using Ollama with enhanced hybrid search"""
+    """
+    Generate BGE-M3 dense and sparse embeddings using local model
+    Following Milvus best practices for hybrid retrieval
+    Reference: https://milvus.io/docs/contextual_retrieval_with_milvus.md
+    """
     try:
-        from langchain_ollama import OllamaEmbeddings
-        
-        print(f"DEBUG: Generating Ollama BGE-M3 embedding for text: '{text[:100]}...'")
-        
-        # Initialize OllamaEmbeddings with BGE-M3 model
-        embeddings = OllamaEmbeddings(
-            model=settings.OLLAMA_EMBEDDING_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
-        )
-        
-        # Generate dense embedding using LangChain
-        dense_vector = embeddings.embed_query(text)
-        
-        print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
-        print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
-        
-        # Check if dense embedding is all zeros (indicates failure)
-        if all(v == 0.0 for v in dense_vector):
-            print("WARNING: Generated dense embedding is all zeros!")
-        
-        # Generate pseudo-sparse vector for hybrid search simulation
-        # This creates a simple keyword-based sparse representation
-        sparse_vector = _generate_pseudo_sparse_vector(text)
-        
-        return {
-            'dense': dense_vector,
-            'sparse': sparse_vector
-        }
+        if settings.USE_BGE_M3_HYBRID:
+            # Use FlagEmbedding BGE-M3 for true hybrid search
+            from FlagEmbedding import BGEM3FlagModel
+            
+            print(f"DEBUG: Generating BGE-M3 hybrid embedding for text: '{text[:100]}...'")
+            
+            # Initialize BGE-M3 model from local path
+            # This model generates both dense (1024-dim) and sparse embeddings
+            bge_m3 = BGEM3FlagModel(
+                settings.BGE_M3_MODEL_PATH,
+                use_fp16=True,  # Use FP16 for faster inference
+                device='cuda'  # Use GPU if available, fallback to CPU
+            )
+            
+            # Generate both dense and sparse embeddings in single pass
+            embeddings = bge_m3.encode(
+                [text],
+                return_dense=True,
+                return_sparse=True,
+                return_colbert_vecs=False  # Disable ColBERT for speed
+            )
+            
+            dense_vector = embeddings['dense'][0].tolist()
+            sparse_vector = embeddings['sparse'][0]  # Sparse in CSR format
+            
+            print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
+            print(f"DEBUG: Generated sparse embedding with {len(sparse_vector)} non-zero elements")
+            print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
+            
+            return {
+                'dense': dense_vector,
+                'sparse': sparse_vector
+            }
+        else:
+            # Fallback: Use Ollama for dense-only embeddings
+            from langchain_ollama import OllamaEmbeddings
+            
+            print(f"DEBUG: Generating Ollama dense embedding for text: '{text[:100]}...'")
+            
+            embeddings = OllamaEmbeddings(
+                model="bge-m3",
+                base_url=settings.OLLAMA_BASE_URL
+            )
+            
+            dense_vector = embeddings.embed_query(text)
+            
+            print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
+            
+            return {
+                'dense': dense_vector,
+                'sparse': {}  # No sparse embeddings
+            }
         
     except Exception as e:
         print(f"BGE-M3 embedding generation error: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        # Return zero vectors as final fallback
+        
+        # Fallback to zero vectors
         return {
             'dense': [0.0] * 1024,
             'sparse': {}
         }
 
-def _generate_pseudo_sparse_vector(text: str) -> dict:
-    """Generate pseudo-sparse vector for hybrid search simulation"""
-    try:
-        import re
-        from collections import Counter
-        
-        # Extract keywords and technical terms
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-        
-        # Filter out common words
-        common_words = {"the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", 
-                       "berapa", "yang", "ada", "di", "dalam", "untuk", "dengan", "oleh", "dari", "pada"}
-        
-        technical_words = [word for word in words if word not in common_words and len(word) >= 3]
-        
-        # Count word frequencies
-        word_counts = Counter(technical_words)
-        
-        # Create sparse vector with top keywords
-        sparse_vector = {}
-        for word, count in word_counts.most_common(50):  # Top 50 keywords
-            # Use hash of word as index to avoid conflicts
-            index = hash(word) % 10000  # Map to 0-9999 range
-            sparse_vector[index] = float(count)
-        
-        print(f"DEBUG: Generated pseudo-sparse vector with {len(sparse_vector)} keywords")
-        return sparse_vector
-        
-    except Exception as e:
-        print(f"Pseudo-sparse vector generation error: {e}")
-        return {}
+# Removed pseudo-sparse vector generation
+# Now using real sparse embeddings from BGE-M3
 
 async def _generate_embedding(text: str) -> List[float]:
     """Legacy function for backward compatibility - generates only dense embedding"""
