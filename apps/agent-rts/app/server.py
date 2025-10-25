@@ -1167,9 +1167,9 @@ def create_custom_agent():
     workflow.add_node("agent", custom_agent_executor)
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", END)
-    # Explicitly set the output to our dedicated 'final_answer' field.
-    # This prevents any further processing or summarization of the message history.
-    return workflow.compile().with_config(output_keys=["final_answer"])
+    # Return the compiled workflow without output_keys restriction
+    # This allows both direct agent calls and /act endpoint to work
+    return workflow.compile()
 
 agent_executor = create_custom_agent()
 
@@ -1203,16 +1203,32 @@ async def act(payload: ActRequest) -> dict:
         print(error_detail)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # The result is now a dictionary with a specific 'final_answer' key.
+    # Try to get final_answer first, then fall back to messages
     content = result.get("final_answer")
     print(f"DEBUG: final_answer content type: {type(content)}")
     print(f"DEBUG: final_answer content preview: {str(content)[:200] if content else 'None'}...")
     
+    # If no final_answer, try to find JSON in messages
     if not content or not isinstance(content, str):
-        print(f"DEBUG: Invalid final_answer - content: {content}, type: {type(content)}")
-        raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons JSON yang valid")
+        print(f"DEBUG: No valid final_answer, searching messages for JSON...")
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            msg_content = getattr(msg, "content", "")
+            if isinstance(msg_content, str):
+                try:
+                    # Check if this message contains valid JSON
+                    orjson.loads(msg_content)
+                    content = msg_content
+                    print(f"DEBUG: Found JSON in message: {content[:200]}...")
+                    break
+                except (orjson.JSONDecodeError, TypeError):
+                    continue
+        
+        if not content:
+            print(f"DEBUG: No JSON found in any message")
+            raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons JSON yang valid")
 
-    print(f"DEBUG: Attempting to parse JSON from final_answer...")
+    print(f"DEBUG: Attempting to parse JSON...")
     try:
         payload_json = orjson.loads(content)
         print(f"DEBUG: JSON parsing successful, returning: {payload_json}")
