@@ -1187,13 +1187,30 @@ async def act(payload: ActRequest) -> dict:
     if not messages:
         raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons")
 
-    final_msg = messages[-1]
-    content = getattr(final_msg, "content", final_msg)
-    if isinstance(content, list):
-        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
-
-    if not isinstance(content, str):
-        content = str(content)
+    # Find the last message content that is valid JSON
+    content = None
+    for msg in reversed(messages):
+        msg_content_str = getattr(msg, "content", "")
+        if isinstance(msg_content_str, str):
+            try:
+                # Check if the content is valid JSON and use it
+                orjson.loads(msg_content_str)
+                content = msg_content_str
+                print(f"DEBUG: Found valid JSON content in message: {content[:200]}...")
+                break  # Stop at the first valid JSON from the end
+            except (orjson.JSONDecodeError, TypeError):
+                # This content is not JSON, continue searching
+                continue
+    
+    # If no JSON content was found, fall back to the last message's content
+    if content is None:
+        final_msg = messages[-1]
+        content = getattr(final_msg, "content", final_msg)
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+        if not isinstance(content, str):
+            content = str(content)
+        print("DEBUG: No JSON message found, falling back to last message content.")
 
     print(f"Agent RTS response: {content}")
 
