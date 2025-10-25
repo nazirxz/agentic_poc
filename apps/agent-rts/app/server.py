@@ -166,7 +166,7 @@ async def answer_rts_general(question: str) -> str:
                         reqs=[dense_req, sparse_req],
                         ranker=RRFRanker(k=60),  # RRF with k=60 (optimal)
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
                     )
                     print(f"DEBUG: Hybrid search (dense + sparse) completed, retrieved {len(results[0]) if results else 0} candidates")
                 else:
@@ -177,7 +177,7 @@ async def answer_rts_general(question: str) -> str:
             anns_field="vector",
             search_params=search_params,
                         limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
                     )
             except Exception as e:
                 print(f"DEBUG: Error in sparse search: {e}, falling back to dense-only")
@@ -187,7 +187,7 @@ async def answer_rts_general(question: str) -> str:
                     anns_field="vector",
                     search_params=search_params,
                     limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
+                    output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
                 )
         else:
             # Fallback to dense-only search
@@ -198,7 +198,7 @@ async def answer_rts_general(question: str) -> str:
                 anns_field="vector",
                 search_params=search_params,
                 limit=settings.RERANKER_TOP_K if settings.USE_RERANKER else settings.TOP_K,
-                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"]
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
             )
         
         print(f"DEBUG: Hybrid search returned {len(results[0]) if results else 0} hits")
@@ -222,7 +222,7 @@ async def answer_rts_general(question: str) -> str:
                     keyword_results = client.query(
                         collection_name=settings.MILVUS_COLLECTION_NAME,
                         filter=filter_expression,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"],
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
                         limit=10
                     )
                     print(f"DEBUG: Dynamic keyword search returned {len(keyword_results)} hits")
@@ -235,7 +235,7 @@ async def answer_rts_general(question: str) -> str:
                         tech_results = client.query(
                             collection_name=settings.MILVUS_COLLECTION_NAME,
                             filter='text like "%specification%" or text like "%standard%"',
-                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary", "context"],
+                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"],
                             limit=5
                         )
                         print(f"DEBUG: Technical specification search returned {len(tech_results)} hits")
@@ -288,7 +288,7 @@ async def answer_rts_general(question: str) -> str:
                                 reqs=[dense_req_filter, sparse_req_filter],
                                 ranker=RRFRanker(k=60),
                                 limit=settings.TOP_K,
-                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
                                 filter=f'category == "{settings.CATEGORY_FILTER}"'
                             )
                         except Exception as e:
@@ -300,7 +300,7 @@ async def answer_rts_general(question: str) -> str:
                                 anns_field="vector",
                                 search_params=search_params,
                                 limit=settings.TOP_K,
-                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
+                                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
                                 filter=f'category == "{settings.CATEGORY_FILTER}"'
                             )
                     else:
@@ -311,7 +311,7 @@ async def answer_rts_general(question: str) -> str:
                         anns_field="vector",
                         search_params=search_params,
                         limit=settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "context"],
+                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
                         filter=f'category == "{settings.CATEGORY_FILTER}"'
                     )
                     print(f"DEBUG: Search with category filter returned {len(results[0]) if results else 0} hits")
@@ -849,8 +849,6 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
             metadata_score += calculate_bm25_like_score(keyword_field, question_keywords, question_content_tokens) * 0.5
         if summary_field:
             metadata_score += calculate_bm25_like_score(summary_field, question_keywords, question_content_tokens) * 0.5
-        if context_field:
-            metadata_score += calculate_bm25_like_score(context_field, question_keywords, question_content_tokens) * settings.CONTEXT_SCORE_WEIGHT
         
         # Source type bonus (hybrid search is generally better)
         source_score = 0.3 if passage.get("source") == "hybrid" else 0.1
