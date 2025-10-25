@@ -655,9 +655,15 @@ async def _expand_query(question: str) -> List[str]:
         import httpx
 
         prompt = (
-            "You are an expert query expander. Your task is to reformulate the user's question to improve search retrieval. "
-            "Generate 2 alternative phrasings for the following question. "
-            'Return a JSON list of strings, like ["variation 1", "variation 2"].\n\n'
+            "You are an expert query expander for a system named 'Rokan Technical Standard' (RTS). "
+            "Your task is to reformulate a user's question to improve search retrieval, while preserving critical named entities. "
+            "CRITICAL RULE: Do NOT change the term 'Rokan' or 'RTS'. It is a proper noun and must be kept as is.\n\n"
+            "Generate up to 2 alternative phrasings for the following question. "
+            "Return ONLY a JSON list of strings.\n\n"
+            "EXAMPLE:\n"
+            'Question: "berapa nilai bil dalam rokan technical standard?"\n'
+            'JSON list of variations: ["what is the bil value in rokan technical standard?", "find bil value in RTS documents"]\n\n'
+            "USER'S QUESTION:\n"
             f'Question: "{question}"\n\n'
             "JSON list of variations:"
         )
@@ -1132,13 +1138,21 @@ class AgentState(TypedDict):
 async def custom_agent_executor(state: AgentState) -> dict:
     """Custom agent that ALWAYS uses the tool and populates a dedicated output field."""
     question = state.get("question", "")
+    print(f"DEBUG: custom_agent_executor called with question: {question}")
     
     # Always call the tool directly
     try:
+        print(f"DEBUG: Calling answer_rts_general tool...")
         tool_result = await answer_rts_general.ainvoke({"question": question})
+        print(f"DEBUG: Tool result type: {type(tool_result)}")
+        print(f"DEBUG: Tool result preview: {str(tool_result)[:200] if tool_result else 'None'}...")
+        
         # Populate the dedicated final_answer field with the raw tool output
-        return {"messages": [AIMessage(content=tool_result)], "final_answer": tool_result}
+        result = {"messages": [AIMessage(content=tool_result)], "final_answer": tool_result}
+        print(f"DEBUG: Returning result with final_answer: {str(tool_result)[:100]}...")
+        return result
     except Exception as e:
+        print(f"DEBUG: Tool call failed with error: {e}")
         error_response = orjson.dumps({
             "domain": "RTS",
             "answer": f"Error: {str(e)}",
@@ -1173,12 +1187,16 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/act")
 async def act(payload: ActRequest) -> dict:
+    print(f"DEBUG: /act endpoint called with question: {payload.question}")
+    
     try:
         # Use custom agent that forces tool usage
         result = await agent_executor.ainvoke({
             "question": payload.question,
             "messages": []
         })
+        print(f"DEBUG: Agent executor result type: {type(result)}")
+        print(f"DEBUG: Agent executor result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
     except Exception as exc:  # pragma: no cover - defensive
         import traceback
         error_detail = f"Agent RTS failure: {exc}\n{traceback.format_exc()}"
@@ -1187,16 +1205,20 @@ async def act(payload: ActRequest) -> dict:
 
     # The result is now a dictionary with a specific 'final_answer' key.
     content = result.get("final_answer")
+    print(f"DEBUG: final_answer content type: {type(content)}")
+    print(f"DEBUG: final_answer content preview: {str(content)[:200] if content else 'None'}...")
+    
     if not content or not isinstance(content, str):
+        print(f"DEBUG: Invalid final_answer - content: {content}, type: {type(content)}")
         raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons JSON yang valid")
 
-    print(f"Agent RTS response: {content}")
-
+    print(f"DEBUG: Attempting to parse JSON from final_answer...")
     try:
         payload_json = orjson.loads(content)
+        print(f"DEBUG: JSON parsing successful, returning: {payload_json}")
+        return payload_json
     except orjson.JSONDecodeError as exc:
         error_msg = f"Output agent tidak dapat dibaca sebagai JSON. Content: {content[:500]}"
-        print(error_msg)
+        print(f"DEBUG: JSON parsing failed: {exc}")
+        print(f"DEBUG: Full content that failed to parse: {content}")
         raise HTTPException(status_code=502, detail=error_msg) from exc
-
-    return payload_json
