@@ -343,24 +343,24 @@ async def answer_rts_general(question: str) -> str:
         relevant_passages = passages[:min(settings.MAX_CONTEXT, settings.MAX_PASSAGES)]
         print(f"DEBUG: Using top {len(relevant_passages)} passages after reranking (limited to prevent timeout)")
         
-        # Additional quality check - prefer technical content but don't filter everything
+        # Quality filtering based on general criteria (no hardcoded terms)
         quality_passages = []
-        filtering_rules = _get_filtering_rules()
         
         for passage in relevant_passages:
-            text = passage.get("text", "").lower()
-            # Skip only if it's clearly administrative content with no technical value
-            if (any(term in text for term in filtering_rules["administrative_terms"]) and 
-                not any(term in text for term in filtering_rules["technical_value_terms"])):
-                print(f"DEBUG: Skipping pure administrative passage: {passage['text'][:50]}...")
-                continue
-            # Skip only very short content
+            text = passage.get("text", "")
+            
+            # Skip very short content (likely not informative)
             if len(text) < settings.MIN_TEXT_LENGTH:
-                print(f"DEBUG: Skipping very short passage: {passage['text'][:50]}...")
+                print(f"DEBUG: Skipping very short passage: {text[:50]}...")
                 continue
+            
+            # Skip passages with very low relevance score (already filtered, but double-check)
+            if passage.get("relevance_score", 0) < settings.MIN_RELEVANCE_SCORE:
+                continue
+            
             quality_passages.append(passage)
         
-        # Use up to MAX_PASSAGES, but prefer quality ones
+        # Use up to MAX_PASSAGES
         relevant_passages = quality_passages[:settings.MAX_PASSAGES] if quality_passages else relevant_passages[:settings.MAX_PASSAGES]
         print(f"DEBUG: Using {len(relevant_passages)} passages after quality filtering")
         
@@ -390,29 +390,27 @@ async def answer_rts_general(question: str) -> str:
             print(f"DEBUG: Context too long ({len(context)} chars), truncating to {settings.MAX_CONTEXT_LENGTH}")
             context = context[:settings.MAX_CONTEXT_LENGTH] + "..."
         
-        # Generate answer using LLM
+        # Generate answer using LLM (production-ready prompt engineering)
         system_prompt = (
-            "Anda adalah asisten teknis yang ahli dalam standar RTS. "
-            "Jawab pertanyaan secara SPESIFIK dan LANGSUNG berdasarkan konteks yang diberikan. "
-            "JANGAN berikan ringkasan umum atau daftar dokumen. "
-            "Fokus pada jawaban spesifik yang diminta. "
-            "Gunakan bahasa Indonesia yang formal dan teknis. "
-            "Sertakan sitasi pada setiap pernyataan faktual. "
-            f"Jika tidak menemukan informasi spesifik yang diminta, balas: {settings.REFUSAL_TEXT}"
+            f"Anda adalah asisten teknis untuk domain {settings.DOMAIN}. "
+            "Tugas Anda: jawab pertanyaan berdasarkan HANYA informasi yang EKSPLISIT tercantum dalam konteks. "
+            "\n\nPrinsip penting:\n"
+            "- Jawab hanya jika ada fakta spesifik yang menjawab pertanyaan\n"
+            "- Jangan buat asumsi atau generalisasi\n"
+            "- Jangan rangkum isi dokumen jika tidak diminta\n"
+            f"- Jika informasi tidak tersedia, katakan dengan jelas: '{settings.REFUSAL_TEXT}'"
         )
         
         user_prompt = (
-            f"PERTANYAAN SPESIFIK: {question}\n\n"
-            f"KONTEKS YANG TERSEDIA:\n{context}\n\n"
-            f"INSTRUKSI PENTING:\n"
-            f"- Jawab PERTANYAAN SPESIFIK yang diminta, bukan ringkasan umum\n"
-            f"- Jika ditanya tentang nilai/nilai spesifik, berikan nilai yang tepat\n"
-            f"- Jika ditanya tentang prosedur, berikan langkah-langkah spesifik\n"
-            f"- JANGAN buat daftar dokumen atau ringkasan\n"
-            f"- Fokus pada jawaban yang diminta\n"
-            f"- Gunakan bahasa Indonesia formal dan teknis\n"
-            f"- Sertakan sitasi pada setiap pernyataan faktual\n"
-            f"- Jika tidak ada informasi spesifik, balas: {settings.REFUSAL_TEXT}"
+            f"Konteks dari dokumen:\n{context}\n\n"
+            f"Pertanyaan: {question}\n\n"
+            "Instruksi:\n"
+            "1. Baca konteks dengan cermat\n"
+            "2. Cari informasi spesifik yang menjawab pertanyaan\n"
+            "3. Jawab berdasarkan fakta yang ada dalam konteks\n"
+            "4. Sertakan referensi dokumen jika relevan\n"
+            f"5. Jika informasi tidak ditemukan: '{settings.REFUSAL_TEXT}'\n\n"
+            "Jawaban:"
         )
         
         llm_payload = {
@@ -474,144 +472,226 @@ async def answer_rts_general(question: str) -> str:
         return await _fallback_llm_response(question, "RTS")
 
 
-def _get_expansion_rules() -> dict:
-    """Get configurable query expansion rules"""
-    return {
-        "nilai": [
-            "value", "parameter", "specification", "standard",
-            "requirement", "criteria", "measurement", "threshold"
-        ],
-        "rokan technical standard": [
-            "RTS", "rokan standard", "technical standard", "engineering standard",
-            "rokan specification", "rokan requirement"
-        ],
-        "berapa": [
-            "what is", "what are", "how much", "how many", "what value", "what parameter"
-        ],
-        "technical": [
-            "specification", "standard", "requirement", "criteria", "parameter"
-        ]
-    }
-
-def _get_filtering_rules() -> dict:
-    """Get configurable filtering rules"""
-    return {
-        "non_technical_terms": ["persetujuan", "pengkinian", "approval", "update", "<!-- image -->", "date", "subject"],
-        "technical_terms": ["specification", "requirement", "standard", "voltage", "insulation", "electrical", "technical"],
-        "rts_terms": ["rts", "rokan", "technical", "standard", "specification"],
-        "administrative_terms": ["persetujuan", "pengkinian", "approval"],
-        "technical_value_terms": ["specification", "standard", "technical", "voltage", "insulation", "requirement", "criteria"]
-    }
+# Removed hardcoded expansion and filtering rules
+# These can be loaded from configuration files or databases in production
 
 def _extract_keywords_from_question(question: str) -> List[str]:
-    """Extract relevant keywords from question for keyword search"""
-    question_lower = question.lower()
-    keywords = []
-    
-    # Extract technical terms (3+ characters, alphanumeric)
+    """Extract relevant keywords from question using TF-IDF-like approach (production-ready)"""
     import re
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', question_lower)
+    from collections import Counter
     
-    # Filter out common words and keep technical terms
-    common_words = {"the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "berapa", "yang", "ada", "di", "dalam", "untuk", "dengan", "oleh"}
-    technical_words = [word for word in words if word not in common_words and len(word) >= 3]
+    question_lower = question.lower()
     
-    # Add specific technical patterns
-    technical_patterns = [
-        r'\b[a-z]{2,}\d+\b',  # Alphanumeric codes like "bil", "rts"
-        r'\b[a-z]+[-_][a-z]+\b',  # Hyphenated terms
-        r'\b[a-z]{4,}\b'  # Longer technical terms
-    ]
+    # Extract all meaningful tokens (alphanumeric, including numbers and mixed)
+    tokens = re.findall(r'\b[\w-]+\b', question_lower)
     
-    for pattern in technical_patterns:
-        matches = re.findall(pattern, question_lower)
-        keywords.extend(matches)
+    # Load or use dynamic stopwords (can be expanded from config/database)
+    stopwords = _get_stopwords()
     
-    # Remove duplicates and limit
-    keywords = list(set(keywords))[:5]  # Max 5 keywords
-    return keywords
+    # Filter tokens by various criteria
+    filtered_tokens = []
+    for token in tokens:
+        # Skip if it's a stopword
+        if token in stopwords:
+            continue
+        
+        # Skip if too short (single char) or all digits
+        if len(token) < 2 or token.isdigit():
+            continue
+        
+        # Keep the token
+        filtered_tokens.append(token)
+    
+    # Calculate importance score for each token based on:
+    # 1. Token length (shorter technical terms can be important)
+    # 2. Frequency in question (repeated terms are important)
+    # 3. Position (earlier terms might be more important)
+    
+    token_scores = {}
+    token_counts = Counter(filtered_tokens)
+    
+    for idx, token in enumerate(filtered_tokens):
+        if token not in token_scores:
+            # Base score from frequency
+            freq_score = token_counts[token] * settings.KEYWORD_FREQ_WEIGHT
+            
+            # Position score (earlier = more important, but not too heavily weighted)
+            position_score = 1.0 / (idx + 1) * settings.KEYWORD_POSITION_WEIGHT
+            
+            # Length score (balanced - not too short, not too long)
+            if 2 <= len(token) <= 4:
+                length_score = 1.5  # Short technical terms
+            elif 5 <= len(token) <= 8:
+                length_score = 1.2  # Medium terms
+            else:
+                length_score = 1.0  # Longer terms
+            
+            # Check if it contains numbers (technical codes often do)
+            has_numbers = bool(re.search(r'\d', token))
+            number_score = 1.3 if has_numbers else 1.0
+            
+            # Combined score
+            token_scores[token] = freq_score + position_score + length_score + number_score
+    
+    # Sort by score and return top keywords
+    sorted_tokens = sorted(token_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Return top N keywords (configurable from settings)
+    top_n = min(settings.MAX_KEYWORDS, len(sorted_tokens))
+    return [token for token, score in sorted_tokens[:top_n]]
+
+def _get_stopwords() -> set:
+    """Get stopwords for filtering (can be loaded from config/database in production)"""
+    # Common stopwords in Indonesian and English
+    # In production, this could be loaded from a file or database
+    return {
+        # English
+        "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+        "a", "an", "as", "are", "be", "been", "is", "was", "were", "will", "would",
+        "can", "could", "do", "does", "did", "have", "has", "had",
+        "this", "that", "these", "those", "what", "where", "when", "which", "who", "whom",
+        "how", "why", "there", "here", "about", "into", "through", "during",
+        # Indonesian
+        "yang", "dan", "atau", "di", "ke", "dari", "pada", "untuk", "dengan", "oleh",
+        "dalam", "adalah", "akan", "telah", "sudah", "belum", "dapat", "bisa",
+        "ada", "tidak", "ini", "itu", "tersebut", "juga", "saja", "hanya",
+        "berapa", "apa", "siapa", "dimana", "kapan", "mengapa", "bagaimana",
+        # Question words that are usually not content-bearing
+        "what", "what's", "whats",
+    }
 
 async def _expand_query(question: str) -> List[str]:
-    """Expand query with synonyms and related terms for better retrieval"""
-    expanded = [question]  # Always include original question
-    expansion_rules = _get_expansion_rules()
+    """
+    Query expansion using embedding-based diversity (production-ready)
     
-    # Apply expansion rules
-    question_lower = question.lower()
-    for key, expansions in expansion_rules.items():
-        if key in question_lower:
-            for expansion in expansions:
-                expanded_query = question_lower.replace(key, expansion)
-                if expanded_query not in expanded:
-                    expanded.append(expanded_query)
+    In production, this could use:
+    - Synonym dictionary from database
+    - Query logs analysis
+    - Embedding-based query rewriting
     
-    # Limit to reasonable number of queries
-    return expanded[:5]
+    For now, we use the original query with minimal expansion
+    to avoid noise and over-generalization
+    """
+    # Start with original query
+    expanded = [question]
+    
+    # Extract keywords for potential variations
+    keywords = _extract_keywords_from_question(question)
+    
+    # For production: could add query variations based on:
+    # 1. Common query patterns from logs
+    # 2. Synonym database
+    # 3. Domain-specific terminology mapping
+    
+    # For now, keep it simple: just use the original query
+    # Multiple dense queries with different ef parameters handle diversity
+    
+    return expanded[:1]  # Return only original query
 
 
 async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
-    """Rerank passages based on relevance to the question"""
+    """
+    Rerank passages using BM25-like scoring + metadata signals (production-ready)
+    
+    This approach is general and doesn't rely on hardcoded patterns.
+    Can be enhanced with:
+    - Cross-encoder reranking models
+    - Learning-to-rank models
+    - User feedback signals
+    """
     if not passages:
         return passages
     
-    question_lower = question.lower()
-    question_words = set(question_lower.split())
+    import re
+    from collections import Counter
     
-    def calculate_relevance_score(passage):
-        score = passage.get("score", 0)
-        text = passage.get("text", "").lower()
-        keyword = passage.get("keyword", "").lower()
-        summary = passage.get("summary", "").lower()
+    question_lower = question.lower()
+    question_tokens = re.findall(r'\b[\w-]+\b', question_lower)
+    question_keywords = _extract_keywords_from_question(question)
+    
+    # Get stopwords for filtering
+    stopwords = _get_stopwords()
+    question_content_tokens = [t for t in question_tokens if t not in stopwords]
+    
+    def calculate_bm25_like_score(text: str, keywords: List[str], content_tokens: List[str]) -> float:
+        """Calculate BM25-like relevance score"""
+        text_lower = text.lower()
+        text_tokens = re.findall(r'\b[\w-]+\b', text_lower)
+        text_token_counts = Counter(text_tokens)
         
-        # Get filtering rules
-        filtering_rules = _get_filtering_rules()
+        score = 0.0
         
-        # Apply penalties for non-technical documents
-        for term in filtering_rules["non_technical_terms"]:
-            if term in text:
-                score -= settings.NON_TECHNICAL_PENALTY
+        # 1. Keyword matching (highest priority)
+        for kw in keywords:
+            # Exact word boundary match
+            pattern = r'\b' + re.escape(kw) + r'\b'
+            matches = len(re.findall(pattern, text_lower))
+            if matches > 0:
+                # BM25-like term frequency saturation
+                # tf_score = (k1 + 1) * tf / (k1 * (1 - b + b * dl/avgdl) + tf)
+                # Simplified version (using configurable k1 from settings)
+                k1 = settings.BM25_K1_KEYWORD
+                tf = matches
+                tf_score = ((k1 + 1) * tf) / (k1 + tf)
+                score += tf_score * 3.0  # Weight for exact keyword matches
         
-        # Boost score for keyword matches
-        if passage.get("source") == "keyword":
-            score += settings.KEYWORD_BOOST
-        
-        # Boost score for hybrid matches (BGE-M3 + RRF)
-        if passage.get("source") == "hybrid":
-            score += settings.TECHNICAL_TERM_BOOST
-        
-        # Boost score for exact keyword matches
-        extracted_keywords = _extract_keywords_from_question(question)
-        for keyword in extracted_keywords:
-            if keyword in text:
-                score += settings.KEYWORD_BOOST
-        
-        # Boost score for technical terms
-        for term in filtering_rules["technical_terms"]:
-            if term in text:
-                score += settings.TECHNICAL_TERM_BOOST
-        
-        # Boost score for RTS-related terms
-        for term in filtering_rules["rts_terms"]:
-            if term in text:
-                score += settings.RTS_TERM_BOOST
-        
-        # Boost score for keyword field matches
-        if keyword and any(word in keyword for word in question_words):
-            score += settings.KEYWORD_BOOST * 0.6  # Slightly less than direct keyword match
-        
-        # Boost score for summary matches
-        if summary and any(word in summary for word in question_words):
-            score += settings.TECHNICAL_TERM_BOOST
-        
-        # Penalize very short passages
-        if len(text) < settings.MIN_TEXT_LENGTH:
-            score -= settings.SHORT_TEXT_PENALTY
-        
-        # Penalize passages that are mostly HTML/formatting
-        if text.count("<") > 5 or text.count("&") > 3:
-            score -= settings.HTML_PENALTY
+        # 2. Content token matching (secondary)
+        for token in content_tokens:
+            if token in text_token_counts:
+                tf = text_token_counts[token]
+                k1 = settings.BM25_K1_CONTENT
+                tf_score = ((k1 + 1) * tf) / (k1 + tf)
+                score += tf_score * 0.5
         
         return score
+    
+    def calculate_relevance_score(passage):
+        # Start with vector search score (already normalized by Milvus)
+        vector_score = -passage.get("score", 0)  # Negative because L2 distance (lower is better)
+        
+        text = passage.get("text", "")
+        keyword_field = passage.get("keyword", "")
+        summary_field = passage.get("summary", "")
+        
+        # Calculate text relevance
+        text_score = calculate_bm25_like_score(text, question_keywords, question_content_tokens)
+        
+        # Boost from metadata fields
+        metadata_score = 0.0
+        if keyword_field:
+            metadata_score += calculate_bm25_like_score(keyword_field, question_keywords, question_content_tokens) * 0.5
+        if summary_field:
+            metadata_score += calculate_bm25_like_score(summary_field, question_keywords, question_content_tokens) * 0.5
+        
+        # Source type bonus (hybrid search is generally better)
+        source_score = 0.3 if passage.get("source") == "hybrid" else 0.1
+        
+        # Quality signals
+        quality_score = 0.0
+        text_len = len(text)
+        
+        # Penalize very short texts (likely not informative)
+        if text_len < 50:
+            quality_score -= 1.0
+        elif text_len < 100:
+            quality_score -= 0.3
+        
+        # Penalize texts with too much HTML/formatting
+        html_ratio = (text.count("<") + text.count(">")) / max(text_len, 1)
+        if html_ratio > 0.1:
+            quality_score -= html_ratio * 5.0
+        
+        # Combined score
+        # Weights are configurable from settings and can be tuned per domain
+        final_score = (
+            vector_score * settings.VECTOR_SCORE_WEIGHT +      # Vector similarity
+            text_score * settings.TEXT_SCORE_WEIGHT +          # Text relevance (highest weight)
+            metadata_score * settings.METADATA_SCORE_WEIGHT +  # Metadata signals
+            source_score +                                      # Source type
+            quality_score                                       # Quality signals
+        )
+        
+        return final_score
     
     # Calculate relevance scores
     for passage in passages:
@@ -623,9 +703,29 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
     # Filter out passages with very low relevance scores
     filtered_passages = [p for p in passages if p["relevance_score"] > settings.MIN_RELEVANCE_SCORE]
     
+    # Additional filter: Dynamic keyword presence check
+    # This ensures passages have at least some overlap with query content
+    extracted_keywords = _extract_keywords_from_question(question)
+    if extracted_keywords and len(filtered_passages) > settings.MAX_PASSAGES * 2:
+        # Only apply keyword filter if we have too many results
+        # This prevents over-filtering when results are already limited
+        keyword_filtered = []
+        for passage in filtered_passages:
+            text_lower = passage.get("text", "").lower()
+            # Check if at least one keyword exists (dynamic, based on extracted keywords)
+            # Prioritize top keywords but check all
+            keyword_match_score = sum(1 for kw in extracted_keywords if kw in text_lower)
+            if keyword_match_score > 0:
+                keyword_filtered.append(passage)
+        
+        # Only apply keyword filter if it doesn't remove too many results
+        if len(keyword_filtered) >= min(5, len(filtered_passages) // 2):
+            filtered_passages = keyword_filtered
+            print(f"DEBUG: Applied dynamic keyword filter, {len(filtered_passages)} passages remain")
+    
     print(f"DEBUG: Passages after filtering: {len(filtered_passages)}/{len(passages)} (min score: {settings.MIN_RELEVANCE_SCORE})")
-    print(f"DEBUG: Top 3 passages after reranking:")
-    for i, passage in enumerate(filtered_passages[:3]):
+    print(f"DEBUG: Top 5 passages after reranking:")
+    for i, passage in enumerate(filtered_passages[:5]):
         print(f"  {i+1}. Score: {passage['relevance_score']:.3f}, Source: {passage['source']}, Text: {passage['text'][:100]}...")
     
     return filtered_passages

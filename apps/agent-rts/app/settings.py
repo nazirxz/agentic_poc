@@ -25,16 +25,22 @@ class AgentSettings(BaseSettings):
     MAX_PASSAGES: int = 4
     MAX_TEXT_LENGTH: int = 500
     MAX_CONTEXT_LENGTH: int = 2000
-    MIN_RELEVANCE_SCORE: float = -0.5
+    MIN_RELEVANCE_SCORE: float = 0.5  # Increased from -0.5 to filter irrelevant results
     MIN_TEXT_LENGTH: int = 30
     
-    # Configurable penalties and boosts
-    NON_TECHNICAL_PENALTY: float = 0.3
-    SHORT_TEXT_PENALTY: float = 0.2
-    HTML_PENALTY: float = 0.8
-    KEYWORD_BOOST: float = 0.5
-    TECHNICAL_TERM_BOOST: float = 0.2
-    RTS_TERM_BOOST: float = 0.1
+    # Configurable reranking weights (can be tuned per domain)
+    VECTOR_SCORE_WEIGHT: float = 0.3
+    TEXT_SCORE_WEIGHT: float = 2.0
+    METADATA_SCORE_WEIGHT: float = 1.0
+    
+    # BM25 parameters (can be tuned)
+    BM25_K1_KEYWORD: float = 1.5  # Term frequency saturation for keywords
+    BM25_K1_CONTENT: float = 1.2  # Term frequency saturation for content tokens
+    
+    # Keyword extraction parameters
+    MAX_KEYWORDS: int = 8
+    KEYWORD_FREQ_WEIGHT: float = 2.0
+    KEYWORD_POSITION_WEIGHT: float = 0.5
     
     # Configurable timeouts
     LLM_TIMEOUT: int = 30
