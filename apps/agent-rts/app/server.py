@@ -1126,16 +1126,18 @@ async def _fallback_llm_response(question: str, domain: str) -> str:
 class AgentState(TypedDict):
     messages: List[Any]
     question: str
+    final_answer: str  # Dedicated field for the final JSON output
 
 # Custom agent executor that forces tool usage
 async def custom_agent_executor(state: AgentState) -> dict:
-    """Custom agent that ALWAYS uses the tool"""
+    """Custom agent that ALWAYS uses the tool and populates a dedicated output field."""
     question = state.get("question", "")
     
     # Always call the tool directly
     try:
         tool_result = await answer_rts_general.ainvoke({"question": question})
-        return {"messages": [AIMessage(content=tool_result)]}
+        # Populate the dedicated final_answer field with the raw tool output
+        return {"messages": [AIMessage(content=tool_result)], "final_answer": tool_result}
     except Exception as e:
         error_response = orjson.dumps({
             "domain": "RTS",
@@ -1143,7 +1145,7 @@ async def custom_agent_executor(state: AgentState) -> dict:
             "citations": [],
             "diagnostic": {"error": str(e)}
         }).decode()
-        return {"messages": [AIMessage(content=error_response)]}
+        return {"messages": [AIMessage(content=error_response)], "final_answer": error_response}
 
 # Create custom graph
 def create_custom_agent():
@@ -1151,9 +1153,9 @@ def create_custom_agent():
     workflow.add_node("agent", custom_agent_executor)
     workflow.set_entry_point("agent")
     workflow.add_edge("agent", END)
-    # By returning the tool output directly, we prevent the LLM from summarizing it.
-    # The 'content' of the AIMessage will be the raw JSON string from the tool.
-    return workflow.compile().with_config(output_keys=["messages"])
+    # Explicitly set the output to our dedicated 'final_answer' field.
+    # This prevents any further processing or summarization of the message history.
+    return workflow.compile().with_config(output_keys=["final_answer"])
 
 agent_executor = create_custom_agent()
 
@@ -1183,34 +1185,10 @@ async def act(payload: ActRequest) -> dict:
         print(error_detail)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    messages = result.get("messages", [])
-    if not messages:
-        raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons")
-
-    # Find the last message content that is valid JSON
-    content = None
-    for msg in reversed(messages):
-        msg_content_str = getattr(msg, "content", "")
-        if isinstance(msg_content_str, str):
-            try:
-                # Check if the content is valid JSON and use it
-                orjson.loads(msg_content_str)
-                content = msg_content_str
-                print(f"DEBUG: Found valid JSON content in message: {content[:200]}...")
-                break  # Stop at the first valid JSON from the end
-            except (orjson.JSONDecodeError, TypeError):
-                # This content is not JSON, continue searching
-                continue
-    
-    # If no JSON content was found, fall back to the last message's content
-    if content is None:
-        final_msg = messages[-1]
-        content = getattr(final_msg, "content", final_msg)
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
-        if not isinstance(content, str):
-            content = str(content)
-        print("DEBUG: No JSON message found, falling back to last message content.")
+    # The result is now a dictionary with a specific 'final_answer' key.
+    content = result.get("final_answer")
+    if not content or not isinstance(content, str):
+        raise HTTPException(status_code=502, detail="Agent tidak menghasilkan respons JSON yang valid")
 
     print(f"Agent RTS response: {content}")
 
