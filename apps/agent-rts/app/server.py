@@ -11,7 +11,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel
 from typing import TypedDict, List, Any
-from pymilvus import MilvusClient, DataType
+from pymilvus import MilvusClient, DataType, AnnSearchRequest, RRFRanker
 
 from .graph import RAGState, build_graph
 from .settings import AgentSettings
@@ -90,14 +90,14 @@ async def answer_rts_general(question: str) -> str:
         expanded_queries = await _expand_query(question)
         print(f"DEBUG: Expanded queries: {expanded_queries}")
         
-        # Generate embeddings for all query variations
-        embeddings = []
+        # Generate BGE-M3 embeddings (dense + sparse) for all query variations
+        embeddings_data = []
         for query in expanded_queries:
-            embedding = await _generate_embedding(query)
-            embeddings.append(embedding)
+            embedding_data = await _generate_bge_m3_embedding(query)
+            embeddings_data.append(embedding_data)
         
         # Use the first (original) embedding for primary search
-        embedding = embeddings[0]
+        primary_embedding_data = embeddings_data[0]
         
         # Search Milvus collection
         search_params = {
@@ -112,24 +112,64 @@ async def answer_rts_general(question: str) -> str:
         
         # Debug: Print search parameters
         print(f"DEBUG: Searching collection: {settings.MILVUS_COLLECTION_NAME}")
-        print(f"DEBUG: Embedding dimension: {len(embedding)}")
+        print(f"DEBUG: Dense embedding dimension: {len(primary_embedding_data['dense'])}")
+        print(f"DEBUG: Sparse embedding keys: {len(primary_embedding_data['sparse'])}")
         print(f"DEBUG: Search limit: {settings.TOP_K}")
         print(f"DEBUG: Available categories: {available_categories}")
         
-        # Hybrid search: Combine vector search with keyword search
+        # Hybrid search: BGE-M3 dense + sparse with RRF reranking
         all_passages = []
         
-        # 1. Vector search
-        vector_results = client.search(
-            collection_name=settings.MILVUS_COLLECTION_NAME,
-            data=[embedding],
+        # 1. Dense vector search with L2 distance
+        dense_req = AnnSearchRequest(
+            data=[primary_embedding_data['dense']],
             anns_field="vector",
-            search_params=search_params,
-            limit=settings.TOP_K,
-            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+            param={"metric_type": "L2", "ef": 64},
+            limit=20  # Retrieve top-20 candidates
         )
         
-        print(f"DEBUG: Vector search returned {len(vector_results[0]) if vector_results else 0} hits")
+        # 2. Sparse vector search with IP (if sparse field exists)
+        sparse_req = None
+        try:
+            # Check if sparse vector field exists in collection
+            collection_info = client.describe_collection(settings.MILVUS_COLLECTION_NAME)
+            has_sparse_field = any(field.get('name') == 'sparse_vector' for field in collection_info.get('fields', []))
+            
+            if has_sparse_field:
+                sparse_req = AnnSearchRequest(
+                    data=[primary_embedding_data['sparse']],
+                    anns_field="sparse_vector",
+                    param={"metric_type": "IP"},
+                    limit=20
+                )
+                print("DEBUG: Sparse vector search enabled")
+            else:
+                print("DEBUG: Sparse vector field not found, using dense-only search")
+        except Exception as e:
+            print(f"DEBUG: Could not check for sparse field: {e}")
+        
+        # 3. Perform hybrid search with RRF reranking
+        if sparse_req:
+            # Hybrid search with both dense and sparse
+            results = client.hybrid_search(
+                collection_name=settings.MILVUS_COLLECTION_NAME,
+                reqs=[dense_req, sparse_req],
+                ranker=RRFRanker(k=60),  # RRF with k=60 (optimal default)
+                limit=settings.TOP_K,
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+            )
+        else:
+            # Fallback to dense-only search
+            results = client.search(
+                collection_name=settings.MILVUS_COLLECTION_NAME,
+                data=[primary_embedding_data['dense']],
+                anns_field="vector",
+                search_params=search_params,
+                limit=settings.TOP_K,
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights", "keyword", "summary"]
+            )
+        
+        print(f"DEBUG: Hybrid search returned {len(results[0]) if results else 0} hits")
         
         # 2. Dynamic keyword search based on extracted keywords
         keyword_results = []
@@ -180,9 +220,6 @@ async def answer_rts_general(question: str) -> str:
             except Exception as e:
                 print(f"DEBUG: Dynamic keyword search failed: {e}")
         
-        # Combine results
-        results = vector_results
-        
         # If we have results, check if we need category filtering
         if results and results[0]:
             # Analyze categories in results
@@ -196,15 +233,27 @@ async def answer_rts_general(question: str) -> str:
                 if settings.CATEGORY_FILTER in available_categories:
                     print(f"DEBUG: Applying category filter: {settings.CATEGORY_FILTER}")
                     # Re-search with category filter
-                    results = client.search(
-                        collection_name=settings.MILVUS_COLLECTION_NAME,
-                        data=[embedding],
-                        anns_field="vector",
-                        search_params=search_params,
-                        limit=settings.TOP_K,
-                        output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-                        filter=f'category == "{settings.CATEGORY_FILTER}"'
-                    )
+                    if sparse_req:
+                        # Hybrid search with category filter
+                        results = client.hybrid_search(
+                            collection_name=settings.MILVUS_COLLECTION_NAME,
+                            reqs=[dense_req, sparse_req],
+                            ranker=RRFRanker(k=60),
+                            limit=settings.TOP_K,
+                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                            filter=f'category == "{settings.CATEGORY_FILTER}"'
+                        )
+                    else:
+                        # Dense-only search with category filter
+                        results = client.search(
+                            collection_name=settings.MILVUS_COLLECTION_NAME,
+                            data=[primary_embedding_data['dense']],
+                            anns_field="vector",
+                            search_params=search_params,
+                            limit=settings.TOP_K,
+                            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                            filter=f'category == "{settings.CATEGORY_FILTER}"'
+                        )
                     print(f"DEBUG: Search with category filter returned {len(results[0]) if results else 0} hits")
                 else:
                     print(f"DEBUG: Category filter '{settings.CATEGORY_FILTER}' not in available categories, using all results")
@@ -215,7 +264,7 @@ async def answer_rts_general(question: str) -> str:
         passages = []
         seen_ids = set()
         
-        # Process vector search results
+        # Process hybrid search results
         if results and results[0]:
             for hit in results[0]:
                 hit_id = hit.get("id")
@@ -227,7 +276,7 @@ async def answer_rts_general(question: str) -> str:
                         "document_name": hit.get("document_name"),
                         "number_page": hit.get("number_page"),
                         "score": hit.get("distance", 0),
-                        "source": "vector",
+                        "source": "hybrid",
                         "keyword": hit.get("keyword", ""),
                         "summary": hit.get("summary", "")
                     })
@@ -258,7 +307,7 @@ async def answer_rts_general(question: str) -> str:
             print(f"DEBUG: Error processing keyword results: {e}")
             # Continue without keyword results
         
-        print(f"DEBUG: Combined results: {len(passages)} passages ({len([p for p in passages if p['source'] == 'vector'])} vector, {len([p for p in passages if p['source'] == 'keyword'])} keyword)")
+        print(f"DEBUG: Combined results: {len(passages)} passages ({len([p for p in passages if p['source'] == 'hybrid'])} hybrid, {len([p for p in passages if p['source'] == 'keyword'])} keyword)")
         
         # Rerank passages based on relevance
         passages = await _rerank_passages(passages, question)
@@ -269,14 +318,14 @@ async def answer_rts_general(question: str) -> str:
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                    "mode": "hybrid_search_with_reranking",
-                    "vector_hits": 0,
-                    "keyword_hits": 0,
-                    "total_hits": 0,
+                "mode": "bge_m3_hybrid_search_with_reranking",
+                "hybrid_hits": 0,
+                "keyword_hits": 0,
+                "total_hits": 0,
                     "collection": settings.MILVUS_COLLECTION_NAME,
                     "search_strategy": "hybrid_no_filter",
                     "available_categories": available_categories,
-                    "embedding_dimension": len(embedding),
+                    "embedding_dimension": len(primary_embedding_data['dense']),
                     "search_limit": settings.TOP_K,
                     "query_expansion": len(expanded_queries) > 1,
                     "reranking_applied": True
@@ -405,8 +454,8 @@ async def answer_rts_general(question: str) -> str:
             "answer": answer,
             "citations": citations,
             "diagnostic": {
-                "mode": "hybrid_search_with_reranking",
-                "vector_hits": len([p for p in passages if p.get("source") == "vector"]),
+                "mode": "bge_m3_hybrid_search_with_reranking",
+                "hybrid_hits": len([p for p in passages if p.get("source") == "hybrid"]),
                 "keyword_hits": len([p for p in passages if p.get("source") == "keyword"]),
                 "total_hits": len(passages),
                 "used_passages": len(context_lines),
@@ -524,6 +573,10 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
         if passage.get("source") == "keyword":
             score += settings.KEYWORD_BOOST
         
+        # Boost score for hybrid matches (BGE-M3 + RRF)
+        if passage.get("source") == "hybrid":
+            score += settings.TECHNICAL_TERM_BOOST
+        
         # Boost score for exact keyword matches
         extracted_keywords = _extract_keywords_from_question(question)
         for keyword in extracted_keywords:
@@ -576,39 +629,54 @@ async def _rerank_passages(passages: List[dict], question: str) -> List[dict]:
     return filtered_passages
 
 
-async def _generate_embedding(text: str) -> List[float]:
-    """Generate embedding for text using Ollama BGE-M3 model"""
+async def _generate_bge_m3_embedding(text: str) -> dict:
+    """Generate BGE-M3 dense and sparse embeddings for text"""
     try:
-        from langchain_ollama import OllamaEmbeddings
+        from FlagEmbedding import BGEM3FlagModel
         
-        print(f"DEBUG: Generating embedding for text: '{text[:100]}...'")
-        print(f"DEBUG: Using embedding model: {settings.OLLAMA_EMBEDDING_MODEL}")
-        print(f"DEBUG: Ollama base URL: {settings.OLLAMA_BASE_URL}")
+        print(f"DEBUG: Generating BGE-M3 embedding for text: '{text[:100]}...'")
         
-        # Initialize OllamaEmbeddings with BGE-M3 model
-        embeddings = OllamaEmbeddings(
-            model=settings.OLLAMA_EMBEDDING_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
+        # Initialize BGE-M3 model with fp16 for speed
+        bge_m3 = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+        
+        # Generate both dense and sparse embeddings in single pass
+        embeddings = bge_m3.encode(
+            [text],
+            return_dense=True,
+            return_sparse=True,
+            return_colbert_vecs=False  # Set False for speed
         )
         
-        # Generate embedding using LangChain
-        embedding_vector = embeddings.embed_query(text)
+        dense_vector = embeddings['dense'][0].tolist()
+        sparse_vector = embeddings['sparse'][0]  # CSR format
         
-        print(f"DEBUG: Generated embedding dimension: {len(embedding_vector)}")
-        print(f"DEBUG: Embedding sample (first 5 values): {embedding_vector[:5]}")
+        print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
+        print(f"DEBUG: Generated sparse embedding keys: {len(sparse_vector)}")
+        print(f"DEBUG: Dense embedding sample (first 5 values): {dense_vector[:5]}")
         
-        # Check if embedding is all zeros (indicates failure)
-        if all(v == 0.0 for v in embedding_vector):
-            print("WARNING: Generated embedding is all zeros!")
+        # Check if dense embedding is all zeros (indicates failure)
+        if all(v == 0.0 for v in dense_vector):
+            print("WARNING: Generated dense embedding is all zeros!")
         
-        return embedding_vector
+        return {
+            'dense': dense_vector,
+            'sparse': sparse_vector
+        }
         
     except Exception as e:
-        print(f"Embedding generation error: {str(e)}")
+        print(f"BGE-M3 embedding generation error: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        # Return zero vector as fallback (BGE-M3 has 3584 dimensions)
-        return [0.0] * 3584
+        # Return zero vectors as fallback (BGE-M3 dense has 1024 dimensions)
+        return {
+            'dense': [0.0] * 1024,
+            'sparse': {}
+        }
+
+async def _generate_embedding(text: str) -> List[float]:
+    """Legacy function for backward compatibility - generates only dense embedding"""
+    embedding_data = await _generate_bge_m3_embedding(text)
+    return embedding_data['dense']
 
 
 async def _fallback_llm_response(question: str, domain: str) -> str:

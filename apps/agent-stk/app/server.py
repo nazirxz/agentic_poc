@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel
 from typing import TypedDict, List, Any
-from pymilvus import MilvusClient, DataType
+from pymilvus import MilvusClient, DataType, AnnSearchRequest, RRFRanker
 
 from .graph import RAGState, build_graph
 from .settings import AgentSettings
@@ -89,8 +89,8 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
         # Initialize Milvus client
         client = MilvusClient(uri=settings.MILVUS_CONNECTION_URI)
         
-        # Generate embedding for the question using Ollama
-        embedding = await _generate_embedding(question)
+        # Generate BGE-M3 embeddings (dense + sparse) for the question
+        embedding_data = await _generate_bge_m3_embedding(question)
         
         # Search Milvus collection
         search_params = {
@@ -108,15 +108,56 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
         # Build filter expression
         filter_expr = f'category == "{settings.CATEGORY_FILTER}" and access_rights == "internal"'
         
-        results = client.search(
-            collection_name=collection_name,
-            data=[embedding],
+        # 1. Dense vector search with L2 distance
+        dense_req = AnnSearchRequest(
+            data=[embedding_data['dense']],
             anns_field="vector",
-            search_params=search_params,
-            limit=settings.TOP_K,
-            output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
-            filter=filter_expr
+            param={"metric_type": "L2", "ef": 64},
+            limit=20  # Retrieve top-20 candidates
         )
+        
+        # 2. Sparse vector search with IP (if sparse field exists)
+        sparse_req = None
+        try:
+            # Check if sparse vector field exists in collection
+            collection_info = client.describe_collection(collection_name)
+            has_sparse_field = any(field.get('name') == 'sparse_vector' for field in collection_info.get('fields', []))
+            
+            if has_sparse_field:
+                sparse_req = AnnSearchRequest(
+                    data=[embedding_data['sparse']],
+                    anns_field="sparse_vector",
+                    param={"metric_type": "IP"},
+                    limit=20
+                )
+                print("DEBUG: Sparse vector search enabled for STK")
+            else:
+                print("DEBUG: Sparse vector field not found, using dense-only search for STK")
+        except Exception as e:
+            print(f"DEBUG: Could not check for sparse field in STK: {e}")
+        
+        # 3. Perform hybrid search with RRF reranking
+        if sparse_req:
+            # Hybrid search with both dense and sparse
+            results = client.hybrid_search(
+                collection_name=collection_name,
+                reqs=[dense_req, sparse_req],
+                ranker=RRFRanker(k=60),  # RRF with k=60 (optimal default)
+                limit=settings.TOP_K,
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                filter=filter_expr
+            )
+        else:
+            # Fallback to dense-only search
+            results = client.search(
+                collection_name=collection_name,
+                data=[embedding_data['dense']],
+                anns_field="vector",
+                search_params=search_params,
+                limit=settings.TOP_K,
+                output_fields=["id", "text", "document_id", "document_name", "number_page", "category", "access_rights"],
+                filter=filter_expr
+            )
         
         # Process results
         passages = []
@@ -129,7 +170,8 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
                     "document_name": hit.get("document_name"),
                     "number_page": hit.get("number_page"),
                     "doc_level_2": hit.get("doc_level_2"),
-                    "score": hit.get("distance", 0)
+                    "score": hit.get("distance", 0),
+                    "source": "hybrid" if sparse_req else "dense"
                 })
         
         if not passages:
@@ -138,10 +180,11 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
                 "answer": settings.REFUSAL_TEXT,
                 "citations": [],
                 "diagnostic": {
-                    "mode": "pymilvus_search",
+                    "mode": "bge_m3_hybrid_search",
                     "collection": collection,
                     "hits": 0,
-                    "collection_name": collection_name
+                    "collection_name": collection_name,
+                    "search_type": "hybrid" if sparse_req else "dense_only"
                 }
             }).decode()
         
@@ -210,11 +253,12 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
             "answer": answer,
             "citations": citations,
             "diagnostic": {
-                "mode": "pymilvus_search",
+                "mode": "bge_m3_hybrid_search",
                 "collection": collection,
                 "hits": len(passages),
                 "used_passages": len(context_lines),
-                "collection_name": collection_name
+                "collection_name": collection_name,
+                "search_type": "hybrid" if sparse_req else "dense_only"
             }
         }).decode()
         
@@ -225,25 +269,53 @@ async def _search_stk_collection(question: str, collection: str | None) -> str:
         return await _fallback_llm_response(question, "STK")
 
 
-async def _generate_embedding(text: str) -> List[float]:
-    """Generate embedding for text using Ollama BGE-M3 model"""
+async def _generate_bge_m3_embedding(text: str) -> dict:
+    """Generate BGE-M3 dense and sparse embeddings for text"""
     try:
-        from langchain_ollama import OllamaEmbeddings
+        from FlagEmbedding import BGEM3FlagModel
         
-        # Initialize OllamaEmbeddings with BGE-M3 model
-        embeddings = OllamaEmbeddings(
-            model=settings.OLLAMA_EMBEDDING_MODEL,
-            base_url=settings.OLLAMA_BASE_URL
+        print(f"DEBUG: Generating BGE-M3 embedding for STK text: '{text[:100]}...'")
+        
+        # Initialize BGE-M3 model with fp16 for speed
+        bge_m3 = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+        
+        # Generate both dense and sparse embeddings in single pass
+        embeddings = bge_m3.encode(
+            [text],
+            return_dense=True,
+            return_sparse=True,
+            return_colbert_vecs=False  # Set False for speed
         )
         
-        # Generate embedding using LangChain
-        embedding_vector = embeddings.embed_query(text)
-        return embedding_vector
+        dense_vector = embeddings['dense'][0].tolist()
+        sparse_vector = embeddings['sparse'][0]  # CSR format
+        
+        print(f"DEBUG: Generated dense embedding dimension: {len(dense_vector)}")
+        print(f"DEBUG: Generated sparse embedding keys: {len(sparse_vector)}")
+        
+        # Check if dense embedding is all zeros (indicates failure)
+        if all(v == 0.0 for v in dense_vector):
+            print("WARNING: Generated dense embedding is all zeros!")
+        
+        return {
+            'dense': dense_vector,
+            'sparse': sparse_vector
+        }
         
     except Exception as e:
-        print(f"Embedding generation error: {str(e)}")
-        # Return zero vector as fallback (BGE-M3 has 3584 dimensions)
-        return [0.0] * 3584
+        print(f"BGE-M3 embedding generation error: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        # Return zero vectors as fallback (BGE-M3 dense has 1024 dimensions)
+        return {
+            'dense': [0.0] * 1024,
+            'sparse': {}
+        }
+
+async def _generate_embedding(text: str) -> List[float]:
+    """Legacy function for backward compatibility - generates only dense embedding"""
+    embedding_data = await _generate_bge_m3_embedding(text)
+    return embedding_data['dense']
 
 
 @tool
