@@ -17,5 +17,11 @@ dependencies = [
     "langchain-ollama",
     "langchain-core",
     "pymilvus>=2.6.0",
-    "FlagEmbedding>=1.2.0",
 ]
+
+# Note: FlagEmbedding should be installed separately or already available in the environment
+# If disk quota is an issue, options:
+# 1. Clean pip cache: pip cache purge
+# 2. Install system-wide: pip install --no-cache-dir FlagEmbedding
+# 3. Use existing installation if available
+# 4. Fallback to Ollama-based embeddings (implemented in code)
